@@ -1,0 +1,22 @@
+{
+  "branches": [
+    {
+      "id": 0,
+      "name": "Main Hospital",
+      "departments": ["ophthalmology", "radiology"],
+      "location": "Central"
+    },
+    {
+      "id": 1,
+      "name": "North Branch",
+      "departments": ["ophthalmology", "radiology"],
+      "location": "North"
+    },
+    {
+      "id": 2,
+      "name": "East Wing",
+      "departments": ["radiology"],
+      "location": "East"
+    }
+  ]
+} 

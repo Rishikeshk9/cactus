@@ -1,0 +1,25 @@
+{
+  "ophthalmology": {
+    "model_type": "resnet50",
+    "input_size": [3, 224, 224],
+    "output_classes": 4,
+    "diseases": ["diabetic_retinopathy", "glaucoma", "cataract", "normal"],
+    "min_clients": 2,
+    "port": 8081,
+    "data_format": "image",
+    "preprocessing": "eye_specific"
+  },
+  "xray": {
+    "model_type": "densenet121",
+    "input_size": [1, 224, 224],
+    "output_classes": 3,
+    "diseases": ["pneumonia", "covid19", "normal"],
+    "min_clients": 2,
+    "port": 8082,
+    "data_format": "image",
+    "preprocessing": "xray_specific"
+  },
+  "stable_diffusion": {
+    "model_id": "runwayml/stable-diffusion-v1-5"
+}
+} 
