@@ -6,6 +6,7 @@ from datetime import datetime
 import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+import aiohttp
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -28,13 +29,20 @@ class GPUClient(BaseModel):
     port: int
     gpu_info: Dict
     loaded_models: List[str]
-    last_heartbeat: str  # Changed from datetime to str
-    status: str  # "active", "inactive", "busy"
-    capabilities: Dict  # VRAM, CUDA version, etc.
+    last_heartbeat: str
+    status: str
+    capabilities: Dict
 
     def get_last_heartbeat(self) -> datetime:
-        """Convert string heartbeat to datetime"""
         return datetime.fromisoformat(self.last_heartbeat)
+
+class PredictionRequest(BaseModel):
+    model_type: str
+    model_cid: str
+    prompt: str
+    inference_steps: int = 30
+    guidance_scale: float = 7.5
+    callback_url: Optional[str] = None
 
 class ClientRegistry:
     def __init__(self):
@@ -91,6 +99,36 @@ class ClientRegistry:
             return self.clients[client_id]
         logger.warning(f"Client not found: {client_id}")
         return None
+
+    def find_best_client(self, model_type: str) -> Optional[GPUClient]:
+        """Find the best available client for the requested model type"""
+        active_clients = self.get_active_clients()
+        logger.info(f"Looking for client with model: {model_type}")
+        logger.info(f"Active clients: {[c.client_id for c in active_clients]}")
+        
+        # First try to find a client that already has the model loaded
+        for client in active_clients:
+            if model_type in client.loaded_models:
+                logger.info(f"Found client {client.client_id} with model {model_type} already loaded")
+                return client
+        
+        # If no client has the model loaded, find the one with the most free memory
+        best_client = None
+        max_free_memory = 0
+        
+        for client in active_clients:
+            if client.status == "active":
+                free_memory = client.gpu_info.get("free_memory", 0)
+                if free_memory > max_free_memory:
+                    max_free_memory = free_memory
+                    best_client = client
+        
+        if best_client:
+            logger.info(f"Selected client {best_client.client_id} with {max_free_memory}GB free memory")
+        else:
+            logger.warning("No suitable client found")
+        
+        return best_client
 
 # Create global registry
 registry = ClientRegistry()
@@ -157,6 +195,35 @@ async def remove_client(client_id: str):
         return {"status": "success", "message": f"Client {client_id} removed"}
     except Exception as e:
         logger.error(f"Error removing client: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/predict")
+async def predict(request: PredictionRequest):
+    """Handle prediction requests and route them to appropriate clients"""
+    logger.info(f"Received prediction request for model: {request.model_type}")
+    
+    # Find the best available client
+    client = registry.find_best_client(request.model_type)
+    if not client:
+        raise HTTPException(status_code=503, detail="No suitable client available")
+    
+    # Forward the request to the selected client
+    client_url = f"http://{client.ip_address}:{client.port}/predict"
+    logger.info(f"Forwarding request to client: {client_url}")
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(client_url, json=request.dict()) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    logger.info(f"Successfully received response from client {client.client_id}")
+                    return result
+                else:
+                    error_text = await response.text()
+                    logger.error(f"Client returned error: {response.status} - {error_text}")
+                    raise HTTPException(status_code=response.status, detail=error_text)
+    except Exception as e:
+        logger.error(f"Error forwarding request to client: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
