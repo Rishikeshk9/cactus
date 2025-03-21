@@ -116,7 +116,6 @@ class ClientRegistry:
         async with self._lock:
             current_time = datetime.now()
             active_clients = []
-            clients_to_remove = []
             
             logger.info(f"Checking active clients at {current_time}")
             
@@ -130,18 +129,37 @@ class ClientRegistry:
                     if time_diff < self.heartbeat_timeout:
                         active_clients.append(client)
                     else:
-                        logger.info(f"Client {client_id} timed out, marking for removal...")
-                        clients_to_remove.append(client_id)
+                        logger.info(f"Client {client_id} timed out")
                 except Exception as e:
                     logger.error(f"Error processing client {client_id}: {str(e)}")
-                    clients_to_remove.append(client_id)
-            
-            # Remove timed out clients after iteration
-            for client_id in clients_to_remove:
-                await self.remove_client(client_id)
             
             logger.info(f"Found {len(active_clients)} active clients")
             return active_clients
+
+    async def cleanup_inactive_clients(self):
+        """Separate method to clean up inactive clients"""
+        async with self._cleanup_lock:
+            current_time = datetime.now()
+            clients_to_remove = []
+            
+            # Create a copy of the clients dictionary
+            clients_copy = dict(self.clients)
+            
+            for client_id, client in clients_copy.items():
+                try:
+                    time_diff = (current_time - client.get_last_heartbeat()).seconds
+                    if time_diff >= self.heartbeat_timeout:
+                        clients_to_remove.append(client_id)
+                        logger.info(f"Marking client {client_id} for removal due to timeout")
+                except Exception as e:
+                    logger.error(f"Error checking client {client_id} for cleanup: {str(e)}")
+                    clients_to_remove.append(client_id)
+            
+            # Remove inactive clients
+            for client_id in clients_to_remove:
+                await self.remove_client(client_id)
+            
+            logger.info(f"Cleanup completed. Removed {len(clients_to_remove)} inactive clients")
 
     async def get_client_by_id(self, client_id: str) -> Optional[GPUClient]:
         async with self._lock:
@@ -255,8 +273,13 @@ async def client_heartbeat(client_id: str, update_data: Dict, request: Request):
 async def get_clients():
     logger.info("Received request for client list")
     try:
+        # First get the list of active clients
         active_clients = await registry.get_active_clients()
         logger.info(f"Returning {len(active_clients)} active clients")
+        
+        # Then run cleanup in the background
+        asyncio.create_task(registry.cleanup_inactive_clients())
+        
         return {
             "active_clients": active_clients,
             "total_clients": len(registry.clients)
