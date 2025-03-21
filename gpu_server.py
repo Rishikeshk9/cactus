@@ -49,8 +49,8 @@ class ClientRegistry:
     def __init__(self):
         self.clients: Dict[str, GPUClient] = {}
         self.heartbeat_timeout = 30  # seconds
-        self._lock = asyncio.Lock()  # Replace threading.Lock with asyncio.Lock
-        self._cleanup_lock = asyncio.Lock()  # Replace threading.Lock with asyncio.Lock
+        self._lock = asyncio.Lock()  # Use asyncio.Lock instead of threading.Lock
+        self._cleanup_lock = asyncio.Lock()  # Use asyncio.Lock instead of threading.Lock
         logger.info("Initialized ClientRegistry")
 
     async def register_client(self, client: GPUClient):
@@ -206,32 +206,28 @@ async def register_client(client: GPUClient):
 async def client_heartbeat(client_id: str, update_data: Dict, request: Request):
     logger.info(f"Received heartbeat from client: {client_id}")
     try:
-        async def process_heartbeat():
-            if "client_id" not in update_data:
-                update_data["client_id"] = client_id
-                
-            if "last_heartbeat" not in update_data:
-                update_data["last_heartbeat"] = datetime.now().isoformat()
+        # Add client_id to update_data if not present
+        if "client_id" not in update_data:
+            update_data["client_id"] = client_id
             
-            # Get client IP and port from request
-            client_host = request.client.host if request.client else "unknown"
-            client_port = request.client.port if request.client else 8000
+        # Ensure we have a last_heartbeat timestamp
+        if "last_heartbeat" not in update_data:
+            update_data["last_heartbeat"] = datetime.now().isoformat()
             
-            # Add required fields if missing
-            update_data.setdefault("ip_address", client_host)
-            update_data.setdefault("port", client_port)
-            update_data.setdefault("gpu_info", {})
-            update_data.setdefault("capabilities", {})
-            
-            success = await registry.update_client(client_id, update_data)
-            if success:
-                return {"status": "success", "message": "Heartbeat received"}
-            raise HTTPException(status_code=404, detail="Client not found")
-
-        return await asyncio.wait_for(process_heartbeat(), timeout=5.0)
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout during client re-registration: {client_id}")
-        raise HTTPException(status_code=504, detail="Registration timeout")
+        # Add client IP and port from request
+        client_host = request.client.host if request.client else "unknown"
+        client_port = request.client.port if request.client else 8000
+        
+        # Add required fields if missing
+        update_data.setdefault("ip_address", client_host)
+        update_data.setdefault("port", client_port)
+        update_data.setdefault("gpu_info", {})
+        update_data.setdefault("capabilities", {})
+        
+        success = await registry.update_client(client_id, update_data)
+        if success:
+            return {"status": "success", "message": "Heartbeat received"}
+        raise HTTPException(status_code=404, detail="Client not found")
     except Exception as e:
         logger.error(f"Error processing heartbeat: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
