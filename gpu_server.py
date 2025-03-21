@@ -124,12 +124,8 @@ class ClientRegistry:
             
             for client_id, client in clients_copy.items():
                 try:
-                    time_diff = (current_time - client.get_last_heartbeat()).seconds
-                    logger.debug(f"Client {client_id} last heartbeat: {time_diff} seconds ago")
-                    if time_diff < self.heartbeat_timeout:
-                        active_clients.append(client)
-                    else:
-                        logger.info(f"Client {client_id} timed out")
+                    active_clients.append(client)
+                    
                 except Exception as e:
                     logger.error(f"Error processing client {client_id}: {str(e)}")
             
@@ -200,6 +196,27 @@ class ClientRegistry:
             
             return best_client
 
+    async def print_clients_table(self):
+        """Print a formatted table of all connected clients"""
+        async with self._lock:
+            current_time = datetime.now()
+            logger.info("\n=== Connected Clients Table ===")
+            logger.info(f"Total Clients: {len(self.clients)}")
+            logger.info(f"Current Time: {current_time}")
+            logger.info("-" * 100)
+            logger.info(f"{'Client ID':<36} {'IP Address':<15} {'Port':<6} {'Status':<8} {'Last Heartbeat':<20} {'Models':<30}")
+            logger.info("-" * 100)
+            
+            for client_id, client in self.clients.items():
+                try:
+                    time_diff = (current_time - client.get_last_heartbeat()).seconds
+                    status = "active" if time_diff < self.heartbeat_timeout else "inactive"
+                    models_str = ", ".join(client.loaded_models[:2]) + ("..." if len(client.loaded_models) > 2 else "")
+                    logger.info(f"{client_id:<36} {client.ip_address:<15} {client.port:<6} {status:<8} {client.last_heartbeat:<20} {models_str:<30}")
+                except Exception as e:
+                    logger.error(f"Error formatting client {client_id}: {str(e)}")
+            logger.info("-" * 100 + "\n")
+
 # Create global registry
 registry = ClientRegistry()
 
@@ -245,6 +262,8 @@ async def client_heartbeat(client_id: str, update_data: Dict, request: Request):
         # Try to update the client
         success = await registry.update_client(client_id, update_data)
         if success:
+            # Print the updated clients table
+            await registry.print_clients_table()
             return {"status": "success", "message": "Heartbeat received"}
         
         # If update failed, try to register the client
@@ -260,6 +279,8 @@ async def client_heartbeat(client_id: str, update_data: Dict, request: Request):
                 capabilities=update_data.get("capabilities", {})
             )
             await registry.register_client(new_client)
+            # Print the updated clients table after registration
+            await registry.print_clients_table()
             return {"status": "success", "message": "Client re-registered"}
         except Exception as e:
             logger.error(f"Error re-registering client: {str(e)}")
