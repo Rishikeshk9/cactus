@@ -50,6 +50,7 @@ class ClientRegistry:
         self.clients: Dict[str, GPUClient] = {}
         self.heartbeat_timeout = 30  # seconds
         self._lock = threading.Lock()  # Add thread lock for synchronization
+        self._cleanup_lock = threading.Lock()  # Separate lock for cleanup operations
         logger.info("Initialized ClientRegistry")
 
     def register_client(self, client: GPUClient):
@@ -111,7 +112,7 @@ class ClientRegistry:
                     return False
 
     def remove_client(self, client_id: str):
-        with self._lock:
+        with self._cleanup_lock:  # Use separate lock for cleanup
             logger.info(f"Removing client: {client_id}")
             if client_id in self.clients:
                 del self.clients[client_id]
@@ -124,6 +125,8 @@ class ClientRegistry:
         with self._lock:
             current_time = datetime.now()
             active_clients = []
+            clients_to_remove = []  # Track clients to remove
+            
             logger.info(f"Checking active clients at {current_time}")
             
             # Create a copy of the clients dictionary to avoid modification during iteration
@@ -136,12 +139,15 @@ class ClientRegistry:
                     if time_diff < self.heartbeat_timeout:
                         active_clients.append(client)
                     else:
-                        logger.info(f"Client {client_id} timed out, removing...")
-                        self.remove_client(client_id)
+                        logger.info(f"Client {client_id} timed out, marking for removal...")
+                        clients_to_remove.append(client_id)
                 except Exception as e:
                     logger.error(f"Error processing client {client_id}: {str(e)}")
-                    # Remove problematic client
-                    self.remove_client(client_id)
+                    clients_to_remove.append(client_id)
+            
+            # Remove timed out clients after iteration
+            for client_id in clients_to_remove:
+                self.remove_client(client_id)
             
             logger.info(f"Found {len(active_clients)} active clients")
             return active_clients
@@ -284,9 +290,19 @@ async def predict(request: PredictionRequest):
                 else:
                     error_text = await response.text()
                     logger.error(f"Client returned error: {response.status} - {error_text}")
+                    # If client returns error, try to find another client
+                    logger.info("Attempting to find another client...")
+                    client = registry.find_best_client(request.model_type)
+                    if client and client.client_id != client.client_id:
+                        return await predict(request)  # Retry with new client
                     raise HTTPException(status_code=response.status, detail=error_text)
     except Exception as e:
         logger.error(f"Error forwarding request to client: {str(e)}")
+        # If request fails, try to find another client
+        logger.info("Attempting to find another client...")
+        client = registry.find_best_client(request.model_type)
+        if client and client.client_id != client.client_id:
+            return await predict(request)  # Retry with new client
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
