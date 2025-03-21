@@ -71,45 +71,21 @@ class ClientRegistry:
             logger.info(f"Successfully registered/updated client: {client.client_id} at {client.ip_address}:{client.port}")
             logger.info(f"Total clients: {len(self.clients)}")
 
-    def update_client(self, client_id: str, update_data: Dict):
-        with self._lock:
-            logger.info(f"Updating client: {client_id}")
-            logger.debug(f"Update data: {update_data}")
-            
-            if client_id in self.clients:
-                client = self.clients[client_id]
-                for key, value in update_data.items():
-                    setattr(client, key, value)
-                logger.info(f"Successfully updated client: {client_id}")
-                return True
-            else:
-                # If client not found, try to re-register with the update data
-                logger.warning(f"Client {client_id} not found, attempting to re-register")
-                try:
-                    # Ensure we have all required fields for re-registration
-                    required_fields = {
-                        "ip_address": update_data.get("ip_address", "unknown"),
-                        "port": update_data.get("port", 8000),
-                        "gpu_info": update_data.get("gpu_info", {}),
-                        "loaded_models": update_data.get("loaded_models", []),
-                        "last_heartbeat": update_data.get("last_heartbeat", datetime.now().isoformat()),
-                        "status": update_data.get("status", "active"),
-                        "capabilities": update_data.get("capabilities", {})
-                    }
+    async def update_client(self, client_id: str, update_data: Dict) -> bool:
+        try:
+            async with asyncio.timeout(3):  # 3-second timeout
+                async with self._lock.async_lock():  # Use asyncio lock instead of threading.Lock
+                    logger.info(f"Updating client: {client_id}")
+                    logger.debug(f"Update data: {update_data}")
                     
-                    # Create a new client object with the required fields
-                    new_client = GPUClient(
-                        client_id=client_id,
-                        **required_fields
-                    )
-                    
-                    # Register the new client
-                    self.register_client(new_client)
-                    logger.info(f"Successfully re-registered client: {client_id}")
-                    return True
-                except Exception as e:
-                    logger.error(f"Failed to re-register client {client_id}: {str(e)}")
-                    return False
+                    if client_id in self.clients:
+                        await self._update_existing_client(client_id, update_data)
+                        return True
+                    else:
+                        return await self._handle_client_registration(client_id, update_data)
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout updating client: {client_id}")
+            return False
 
     def remove_client(self, client_id: str):
         with self._cleanup_lock:  # Use separate lock for cleanup
@@ -215,17 +191,27 @@ async def register_client(client: GPUClient):
 async def client_heartbeat(client_id: str, update_data: Dict):
     logger.info(f"Received heartbeat from client: {client_id}")
     try:
-        # Add client_id to update_data if not present
-        if "client_id" not in update_data:
-            update_data["client_id"] = client_id
+        # Add timeout for re-registration
+        async with asyncio.timeout(5):  # 5-second timeout
+            if "client_id" not in update_data:
+                update_data["client_id"] = client_id
+                
+            if "last_heartbeat" not in update_data:
+                update_data["last_heartbeat"] = datetime.now().isoformat()
             
-        # Ensure we have a last_heartbeat timestamp
-        if "last_heartbeat" not in update_data:
-            update_data["last_heartbeat"] = datetime.now().isoformat()
+            # Add required fields if missing
+            update_data.setdefault("ip_address", request.client.host)
+            update_data.setdefault("port", request.client.port)
+            update_data.setdefault("gpu_info", {})
+            update_data.setdefault("capabilities", {})
             
-        if registry.update_client(client_id, update_data):
-            return {"status": "success", "message": "Heartbeat received"}
-        raise HTTPException(status_code=404, detail="Client not found")
+            success = await registry.update_client(client_id, update_data)
+            if success:
+                return {"status": "success", "message": "Heartbeat received"}
+            raise HTTPException(status_code=404, detail="Client not found")
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout during client re-registration: {client_id}")
+        raise HTTPException(status_code=504, detail="Registration timeout")
     except Exception as e:
         logger.error(f"Error processing heartbeat: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
