@@ -7,6 +7,7 @@ import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 import aiohttp
+import threading
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -48,87 +49,128 @@ class ClientRegistry:
     def __init__(self):
         self.clients: Dict[str, GPUClient] = {}
         self.heartbeat_timeout = 30  # seconds
+        self._lock = threading.Lock()  # Add thread lock for synchronization
         logger.info("Initialized ClientRegistry")
 
     def register_client(self, client: GPUClient):
-        logger.info(f"Registering new client: {client.client_id}")
-        logger.debug(f"Client details: {client.dict()}")
-        self.clients[client.client_id] = client
-        logger.info(f"Successfully registered client: {client.client_id} at {client.ip_address}:{client.port}")
-        logger.info(f"Total clients: {len(self.clients)}")
+        with self._lock:
+            logger.info(f"Registering new client: {client.client_id}")
+            logger.debug(f"Client details: {client.dict()}")
+            
+            # If client already exists, update its information
+            if client.client_id in self.clients:
+                logger.info(f"Client {client.client_id} already exists, updating information")
+                existing_client = self.clients[client.client_id]
+                for key, value in client.dict().items():
+                    setattr(existing_client, key, value)
+                self.clients[client.client_id] = existing_client
+            else:
+                self.clients[client.client_id] = client
+                
+            logger.info(f"Successfully registered/updated client: {client.client_id} at {client.ip_address}:{client.port}")
+            logger.info(f"Total clients: {len(self.clients)}")
 
     def update_client(self, client_id: str, update_data: Dict):
-        logger.info(f"Updating client: {client_id}")
-        logger.debug(f"Update data: {update_data}")
-        if client_id in self.clients:
-            client = self.clients[client_id]
-            for key, value in update_data.items():
-                setattr(client, key, value)
-            logger.info(f"Successfully updated client: {client_id}")
-            return True
-        logger.warning(f"Client not found: {client_id}")
-        return False
+        with self._lock:
+            logger.info(f"Updating client: {client_id}")
+            logger.debug(f"Update data: {update_data}")
+            
+            if client_id in self.clients:
+                client = self.clients[client_id]
+                for key, value in update_data.items():
+                    setattr(client, key, value)
+                logger.info(f"Successfully updated client: {client_id}")
+                return True
+            else:
+                # If client not found, try to re-register with the update data
+                logger.warning(f"Client {client_id} not found, attempting to re-register")
+                try:
+                    # Create a new client object with the update data
+                    new_client = GPUClient(
+                        client_id=client_id,
+                        ip_address=update_data.get("ip_address", "unknown"),
+                        port=update_data.get("port", 8000),
+                        gpu_info=update_data.get("gpu_info", {}),
+                        loaded_models=update_data.get("loaded_models", []),
+                        last_heartbeat=update_data.get("last_heartbeat", datetime.now().isoformat()),
+                        status=update_data.get("status", "active"),
+                        capabilities=update_data.get("capabilities", {})
+                    )
+                    self.register_client(new_client)
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to re-register client {client_id}: {str(e)}")
+                    return False
 
     def remove_client(self, client_id: str):
-        logger.info(f"Removing client: {client_id}")
-        if client_id in self.clients:
-            del self.clients[client_id]
-            logger.info(f"Successfully removed client: {client_id}")
-            logger.info(f"Remaining clients: {len(self.clients)}")
-        else:
-            logger.warning(f"Client not found for removal: {client_id}")
+        with self._lock:
+            logger.info(f"Removing client: {client_id}")
+            if client_id in self.clients:
+                del self.clients[client_id]
+                logger.info(f"Successfully removed client: {client_id}")
+                logger.info(f"Remaining clients: {len(self.clients)}")
+            else:
+                logger.warning(f"Client not found for removal: {client_id}")
 
     def get_active_clients(self) -> List[GPUClient]:
-        current_time = datetime.now()
-        active_clients = []
-        logger.info(f"Checking active clients at {current_time}")
-        for client_id, client in self.clients.items():
-            time_diff = (current_time - client.get_last_heartbeat()).seconds
-            logger.debug(f"Client {client_id} last heartbeat: {time_diff} seconds ago")
-            if time_diff < self.heartbeat_timeout:
-                active_clients.append(client)
-            else:
-                logger.info(f"Client {client_id} timed out, removing...")
-                self.remove_client(client_id)
-        logger.info(f"Found {len(active_clients)} active clients")
-        return active_clients
+        with self._lock:
+            current_time = datetime.now()
+            active_clients = []
+            logger.info(f"Checking active clients at {current_time}")
+            
+            # Create a copy of the clients dictionary to avoid modification during iteration
+            clients_copy = dict(self.clients)
+            
+            for client_id, client in clients_copy.items():
+                time_diff = (current_time - client.get_last_heartbeat()).seconds
+                logger.debug(f"Client {client_id} last heartbeat: {time_diff} seconds ago")
+                if time_diff < self.heartbeat_timeout:
+                    active_clients.append(client)
+                else:
+                    logger.info(f"Client {client_id} timed out, removing...")
+                    self.remove_client(client_id)
+            
+            logger.info(f"Found {len(active_clients)} active clients")
+            return active_clients
 
     def get_client_by_id(self, client_id: str) -> Optional[GPUClient]:
-        if client_id in self.clients:
-            logger.info(f"Found client: {client_id}")
-            return self.clients[client_id]
-        logger.warning(f"Client not found: {client_id}")
-        return None
+        with self._lock:
+            if client_id in self.clients:
+                logger.info(f"Found client: {client_id}")
+                return self.clients[client_id]
+            logger.warning(f"Client not found: {client_id}")
+            return None
 
     def find_best_client(self, model_type: str) -> Optional[GPUClient]:
         """Find the best available client for the requested model type"""
-        active_clients = self.get_active_clients()
-        logger.info(f"Looking for client with model: {model_type}")
-        logger.info(f"Active clients: {[c.client_id for c in active_clients]}")
-        
-        # First try to find a client that already has the model loaded
-        for client in active_clients:
-            if model_type in client.loaded_models:
-                logger.info(f"Found client {client.client_id} with model {model_type} already loaded")
-                return client
-        
-        # If no client has the model loaded, find the one with the most free memory
-        best_client = None
-        max_free_memory = 0
-        
-        for client in active_clients:
-            if client.status == "active":
-                free_memory = client.gpu_info.get("free_memory", 0)
-                if free_memory > max_free_memory:
-                    max_free_memory = free_memory
-                    best_client = client
-        
-        if best_client:
-            logger.info(f"Selected client {best_client.client_id} with {max_free_memory}GB free memory")
-        else:
-            logger.warning("No suitable client found")
-        
-        return best_client
+        with self._lock:
+            active_clients = self.get_active_clients()
+            logger.info(f"Looking for client with model: {model_type}")
+            logger.info(f"Active clients: {[c.client_id for c in active_clients]}")
+            
+            # First try to find a client that already has the model loaded
+            for client in active_clients:
+                if model_type in client.loaded_models:
+                    logger.info(f"Found client {client.client_id} with model {model_type} already loaded")
+                    return client
+            
+            # If no client has the model loaded, find the one with the most free memory
+            best_client = None
+            max_free_memory = 0
+            
+            for client in active_clients:
+                if client.status == "active":
+                    free_memory = client.gpu_info.get("free_memory", 0)
+                    if free_memory > max_free_memory:
+                        max_free_memory = free_memory
+                        best_client = client
+            
+            if best_client:
+                logger.info(f"Selected client {best_client.client_id} with {max_free_memory}GB free memory")
+            else:
+                logger.warning("No suitable client found")
+            
+            return best_client
 
 # Create global registry
 registry = ClientRegistry()
@@ -154,6 +196,10 @@ async def register_client(client: GPUClient):
 async def client_heartbeat(client_id: str, update_data: Dict):
     logger.info(f"Received heartbeat from client: {client_id}")
     try:
+        # Add client_id to update_data if not present
+        if "client_id" not in update_data:
+            update_data["client_id"] = client_id
+            
         if registry.update_client(client_id, update_data):
             return {"status": "success", "message": "Heartbeat received"}
         raise HTTPException(status_code=404, detail="Client not found")
