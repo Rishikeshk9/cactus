@@ -44,6 +44,8 @@ class PredictionRequest(BaseModel):
     inference_steps: int = 30
     guidance_scale: float = 7.5
     callback_url: Optional[str] = None
+    image_data: Optional[str] = None  # Base64 encoded image data
+    image_url: Optional[str] = None    # URL of the image
 
 class ClientRegistry:
     def __init__(self):
@@ -346,8 +348,17 @@ async def predict(request: PredictionRequest):
     logger.info(f"Forwarding request to client: {client_url}")
     
     try:
+        # Prepare the request data
+        request_data = request.dict()
+        
+        # If we have image data, ensure it's properly formatted
+        if request_data.get("image_data"):
+            # Ensure the base64 data is properly formatted
+            if not request_data["image_data"].startswith("data:image/"):
+                request_data["image_data"] = f"data:image/jpeg;base64,{request_data['image_data']}"
+        
         async with aiohttp.ClientSession() as session:
-            async with session.post(client_url, json=request.dict()) as response:
+            async with session.post(client_url, json=request_data) as response:
                 if response.status == 200:
                     result = await response.json()
                     logger.info(f"Successfully received response from client {client.client_id}")
