@@ -224,10 +224,29 @@ async def client_heartbeat(client_id: str, update_data: Dict, request: Request):
         update_data.setdefault("gpu_info", {})
         update_data.setdefault("capabilities", {})
         
+        # Try to update the client
         success = await registry.update_client(client_id, update_data)
         if success:
             return {"status": "success", "message": "Heartbeat received"}
-        raise HTTPException(status_code=404, detail="Client not found")
+        
+        # If update failed, try to register the client
+        try:
+            new_client = GPUClient(
+                client_id=client_id,
+                ip_address=client_host,
+                port=client_port,
+                gpu_info=update_data.get("gpu_info", {}),
+                loaded_models=update_data.get("loaded_models", []),
+                last_heartbeat=update_data.get("last_heartbeat", datetime.now().isoformat()),
+                status=update_data.get("status", "active"),
+                capabilities=update_data.get("capabilities", {})
+            )
+            await registry.register_client(new_client)
+            return {"status": "success", "message": "Client re-registered"}
+        except Exception as e:
+            logger.error(f"Error re-registering client: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+            
     except Exception as e:
         logger.error(f"Error processing heartbeat: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
