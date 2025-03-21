@@ -115,33 +115,26 @@ class GPUModelLoader:
             self.models = {}
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
             self.torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
-            
-            # Initialize client manager
-            self.client_manager = GPUClientManager()
-            
-            # Define class labels for COVID model
-            self.covid_classes = ['COVID-19', 'Normal', 'Pneumonia']
-            
-            # Define image transforms for COVID model
-            self.covid_transforms = transforms.Compose([
-                transforms.Resize((224, 224)),
-                transforms.Grayscale(num_output_channels=1),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485], std=[0.229])
-            ])
+            self.port = 8000  # Default port
+            self.client_manager = None
             self.initialized = True
 
     def get_loaded_models(self):
         """Get list of currently loaded models"""
         return list(self.models.keys())
 
-    async def start_client_manager(self, server_url: str = None):
+    async def start_client_manager(self, server_url: str = None, port: int = 8000):
         """Start the client manager"""
+        self.port = port
+        if not self.client_manager:
+            self.client_manager = GPUClientManager(server_url=server_url, port=self.port)
         return await self.client_manager.start(self.get_loaded_models, server_url)
 
     async def stop_client_manager(self):
         """Stop the client manager"""
-        await self.client_manager.stop()
+        if self.client_manager:
+            await self.client_manager.stop()
+            self.client_manager = None
 
     def load_model_config(self, model_type: str) -> ModelConfig:
         """Load model configuration from JSON file"""
@@ -658,9 +651,6 @@ async def unload_models(model_type: Optional[str] = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
- 
-# ... existing code ...
-
 if __name__ == "__main__":
     import uvicorn
     import asyncio
@@ -669,18 +659,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='GPU Load Server')
     parser.add_argument('--gateway', type=str, default='localhost',
                       help='IP address of the GPU server (default: localhost)')
+    parser.add_argument('--port', type=int, default=8000,
+                      help='Port to run the GPU load server on (default: 8000)')
     args = parser.parse_args()
     
     # Set the server URL based on the gateway argument
     server_url = f"http://{args.gateway}"
     print(f"Connecting to GPU server at: {server_url}")
+    print(f"Starting GPU load server on port: {args.port}")
     
     async def main():
         # Start the client manager with the specified server URL
-        await gpu_loader.start_client_manager(server_url)
+        await gpu_loader.start_client_manager(server_url, args.port)
         
-        # Start the FastAPI server
-        config = uvicorn.Config(app, host="0.0.0.0", port=8000)
+        # Start the FastAPI server with the specified port
+        config = uvicorn.Config(app, host="0.0.0.0", port=args.port)
         server = uvicorn.Server(config)
         await server.serve()
         

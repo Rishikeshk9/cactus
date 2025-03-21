@@ -49,12 +49,12 @@ class ClientRegistry:
     def __init__(self):
         self.clients: Dict[str, GPUClient] = {}
         self.heartbeat_timeout = 30  # seconds
-        self._lock = threading.Lock()  # Add thread lock for synchronization
-        self._cleanup_lock = threading.Lock()  # Separate lock for cleanup operations
+        self._lock = asyncio.Lock()  # Replace threading.Lock with asyncio.Lock
+        self._cleanup_lock = asyncio.Lock()  # Replace threading.Lock with asyncio.Lock
         logger.info("Initialized ClientRegistry")
 
-    def register_client(self, client: GPUClient):
-        with self._lock:
+    async def register_client(self, client: GPUClient):
+        async with self._lock:
             logger.info(f"Registering new client: {client.client_id}")
             logger.debug(f"Client details: {client.dict()}")
             
@@ -73,22 +73,37 @@ class ClientRegistry:
 
     async def update_client(self, client_id: str, update_data: Dict) -> bool:
         try:
-            async with asyncio.timeout(3):  # 3-second timeout
-                async with self._lock.async_lock():  # Use asyncio lock instead of threading.Lock
-                    logger.info(f"Updating client: {client_id}")
-                    logger.debug(f"Update data: {update_data}")
-                    
-                    if client_id in self.clients:
-                        await self._update_existing_client(client_id, update_data)
-                        return True
-                    else:
-                        return await self._handle_client_registration(client_id, update_data)
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout updating client: {client_id}")
+            async with self._lock:
+                logger.info(f"Updating client: {client_id}")
+                logger.debug(f"Update data: {update_data}")
+                
+                if client_id in self.clients:
+                    client = self.clients[client_id]
+                    for key, value in update_data.items():
+                        setattr(client, key, value)
+                    logger.info(f"Successfully updated client: {client_id}")
+                    return True
+                else:
+                    # Create new client from update data
+                    new_client = GPUClient(
+                        client_id=client_id,
+                        ip_address=update_data.get("ip_address", "unknown"),
+                        port=update_data.get("port", 8000),
+                        gpu_info=update_data.get("gpu_info", {}),
+                        loaded_models=update_data.get("loaded_models", []),
+                        last_heartbeat=update_data.get("last_heartbeat", datetime.now().isoformat()),
+                        status=update_data.get("status", "active"),
+                        capabilities=update_data.get("capabilities", {})
+                    )
+                    await self.register_client(new_client)
+                    return True
+
+        except Exception as e:
+            logger.error(f"Error updating client: {str(e)}")
             return False
 
-    def remove_client(self, client_id: str):
-        with self._cleanup_lock:  # Use separate lock for cleanup
+    async def remove_client(self, client_id: str):
+        async with self._cleanup_lock:
             logger.info(f"Removing client: {client_id}")
             if client_id in self.clients:
                 del self.clients[client_id]
@@ -97,11 +112,11 @@ class ClientRegistry:
             else:
                 logger.warning(f"Client not found for removal: {client_id}")
 
-    def get_active_clients(self) -> List[GPUClient]:
-        with self._lock:
+    async def get_active_clients(self) -> List[GPUClient]:
+        async with self._lock:
             current_time = datetime.now()
             active_clients = []
-            clients_to_remove = []  # Track clients to remove
+            clients_to_remove = []
             
             logger.info(f"Checking active clients at {current_time}")
             
@@ -123,23 +138,23 @@ class ClientRegistry:
             
             # Remove timed out clients after iteration
             for client_id in clients_to_remove:
-                self.remove_client(client_id)
+                await self.remove_client(client_id)
             
             logger.info(f"Found {len(active_clients)} active clients")
             return active_clients
 
-    def get_client_by_id(self, client_id: str) -> Optional[GPUClient]:
-        with self._lock:
+    async def get_client_by_id(self, client_id: str) -> Optional[GPUClient]:
+        async with self._lock:
             if client_id in self.clients:
                 logger.info(f"Found client: {client_id}")
                 return self.clients[client_id]
             logger.warning(f"Client not found: {client_id}")
             return None
 
-    def find_best_client(self, model_type: str) -> Optional[GPUClient]:
+    async def find_best_client(self, model_type: str) -> Optional[GPUClient]:
         """Find the best available client for the requested model type"""
-        with self._lock:
-            active_clients = self.get_active_clients()
+        async with self._lock:
+            active_clients = await self.get_active_clients()
             logger.info(f"Looking for client with model: {model_type}")
             logger.info(f"Active clients: {[c.client_id for c in active_clients]}")
             
@@ -181,27 +196,30 @@ async def log_requests(request: Request, call_next):
 async def register_client(client: GPUClient):
     logger.info(f"Received registration request from client: {client.client_id}")
     try:
-        registry.register_client(client)
+        await registry.register_client(client)
         return {"status": "success", "message": f"Client {client.client_id} registered"}
     except Exception as e:
         logger.error(f"Error registering client: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/heartbeat/{client_id}")
-async def client_heartbeat(client_id: str, update_data: Dict):
+async def client_heartbeat(client_id: str, update_data: Dict, request: Request):
     logger.info(f"Received heartbeat from client: {client_id}")
     try:
-        # Add timeout for re-registration
-        async with asyncio.timeout(5):  # 5-second timeout
+        async def process_heartbeat():
             if "client_id" not in update_data:
                 update_data["client_id"] = client_id
                 
             if "last_heartbeat" not in update_data:
                 update_data["last_heartbeat"] = datetime.now().isoformat()
             
+            # Get client IP and port from request
+            client_host = request.client.host if request.client else "unknown"
+            client_port = request.client.port if request.client else 8000
+            
             # Add required fields if missing
-            update_data.setdefault("ip_address", request.client.host)
-            update_data.setdefault("port", request.client.port)
+            update_data.setdefault("ip_address", client_host)
+            update_data.setdefault("port", client_port)
             update_data.setdefault("gpu_info", {})
             update_data.setdefault("capabilities", {})
             
@@ -209,6 +227,8 @@ async def client_heartbeat(client_id: str, update_data: Dict):
             if success:
                 return {"status": "success", "message": "Heartbeat received"}
             raise HTTPException(status_code=404, detail="Client not found")
+
+        return await asyncio.wait_for(process_heartbeat(), timeout=5.0)
     except asyncio.TimeoutError:
         logger.error(f"Timeout during client re-registration: {client_id}")
         raise HTTPException(status_code=504, detail="Registration timeout")
@@ -220,7 +240,7 @@ async def client_heartbeat(client_id: str, update_data: Dict):
 async def get_clients():
     logger.info("Received request for client list")
     try:
-        active_clients = registry.get_active_clients()
+        active_clients = await registry.get_active_clients()
         logger.info(f"Returning {len(active_clients)} active clients")
         return {
             "active_clients": active_clients,
@@ -234,7 +254,7 @@ async def get_clients():
 async def get_client(client_id: str):
     logger.info(f"Received request for client: {client_id}")
     try:
-        client = registry.get_client_by_id(client_id)
+        client = await registry.get_client_by_id(client_id)
         if client:
             return client
         raise HTTPException(status_code=404, detail="Client not found")
@@ -246,7 +266,7 @@ async def get_client(client_id: str):
 async def remove_client(client_id: str):
     logger.info(f"Received request to remove client: {client_id}")
     try:
-        registry.remove_client(client_id)
+        await registry.remove_client(client_id)
         return {"status": "success", "message": f"Client {client_id} removed"}
     except Exception as e:
         logger.error(f"Error removing client: {str(e)}")
@@ -258,7 +278,7 @@ async def predict(request: PredictionRequest):
     logger.info(f"Received prediction request for model: {request.model_type}")
     
     # Find the best available client
-    client = registry.find_best_client(request.model_type)
+    client = await registry.find_best_client(request.model_type)
     if not client:
         raise HTTPException(status_code=503, detail="No suitable client available")
     
@@ -278,7 +298,7 @@ async def predict(request: PredictionRequest):
                     logger.error(f"Client returned error: {response.status} - {error_text}")
                     # If client returns error, try to find another client
                     logger.info("Attempting to find another client...")
-                    client = registry.find_best_client(request.model_type)
+                    client = await registry.find_best_client(request.model_type)
                     if client and client.client_id != client.client_id:
                         return await predict(request)  # Retry with new client
                     raise HTTPException(status_code=response.status, detail=error_text)
@@ -286,7 +306,7 @@ async def predict(request: PredictionRequest):
         logger.error(f"Error forwarding request to client: {str(e)}")
         # If request fails, try to find another client
         logger.info("Attempting to find another client...")
-        client = registry.find_best_client(request.model_type)
+        client = await registry.find_best_client(request.model_type)
         if client and client.client_id != client.client_id:
             return await predict(request)  # Retry with new client
         raise HTTPException(status_code=500, detail=str(e))
