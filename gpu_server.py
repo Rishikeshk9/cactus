@@ -85,18 +85,26 @@ class ClientRegistry:
                 # If client not found, try to re-register with the update data
                 logger.warning(f"Client {client_id} not found, attempting to re-register")
                 try:
-                    # Create a new client object with the update data
+                    # Ensure we have all required fields for re-registration
+                    required_fields = {
+                        "ip_address": update_data.get("ip_address", "unknown"),
+                        "port": update_data.get("port", 8000),
+                        "gpu_info": update_data.get("gpu_info", {}),
+                        "loaded_models": update_data.get("loaded_models", []),
+                        "last_heartbeat": update_data.get("last_heartbeat", datetime.now().isoformat()),
+                        "status": update_data.get("status", "active"),
+                        "capabilities": update_data.get("capabilities", {})
+                    }
+                    
+                    # Create a new client object with the required fields
                     new_client = GPUClient(
                         client_id=client_id,
-                        ip_address=update_data.get("ip_address", "unknown"),
-                        port=update_data.get("port", 8000),
-                        gpu_info=update_data.get("gpu_info", {}),
-                        loaded_models=update_data.get("loaded_models", []),
-                        last_heartbeat=update_data.get("last_heartbeat", datetime.now().isoformat()),
-                        status=update_data.get("status", "active"),
-                        capabilities=update_data.get("capabilities", {})
+                        **required_fields
                     )
+                    
+                    # Register the new client
                     self.register_client(new_client)
+                    logger.info(f"Successfully re-registered client: {client_id}")
                     return True
                 except Exception as e:
                     logger.error(f"Failed to re-register client {client_id}: {str(e)}")
@@ -122,12 +130,17 @@ class ClientRegistry:
             clients_copy = dict(self.clients)
             
             for client_id, client in clients_copy.items():
-                time_diff = (current_time - client.get_last_heartbeat()).seconds
-                logger.debug(f"Client {client_id} last heartbeat: {time_diff} seconds ago")
-                if time_diff < self.heartbeat_timeout:
-                    active_clients.append(client)
-                else:
-                    logger.info(f"Client {client_id} timed out, removing...")
+                try:
+                    time_diff = (current_time - client.get_last_heartbeat()).seconds
+                    logger.debug(f"Client {client_id} last heartbeat: {time_diff} seconds ago")
+                    if time_diff < self.heartbeat_timeout:
+                        active_clients.append(client)
+                    else:
+                        logger.info(f"Client {client_id} timed out, removing...")
+                        self.remove_client(client_id)
+                except Exception as e:
+                    logger.error(f"Error processing client {client_id}: {str(e)}")
+                    # Remove problematic client
                     self.remove_client(client_id)
             
             logger.info(f"Found {len(active_clients)} active clients")
@@ -199,6 +212,10 @@ async def client_heartbeat(client_id: str, update_data: Dict):
         # Add client_id to update_data if not present
         if "client_id" not in update_data:
             update_data["client_id"] = client_id
+            
+        # Ensure we have a last_heartbeat timestamp
+        if "last_heartbeat" not in update_data:
+            update_data["last_heartbeat"] = datetime.now().isoformat()
             
         if registry.update_client(client_id, update_data):
             return {"status": "success", "message": "Heartbeat received"}
