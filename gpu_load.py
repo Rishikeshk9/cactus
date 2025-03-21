@@ -17,6 +17,8 @@ from typing import Optional, Literal
 from diffusers import StableDiffusionPipeline
 import base64
 from fastapi.middleware.cors import CORSMiddleware
+from gpu_client import GPUClientManager
+import argparse
 
 app = FastAPI()
 
@@ -114,6 +116,9 @@ class GPUModelLoader:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
             self.torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
             
+            # Initialize client manager
+            self.client_manager = GPUClientManager()
+            
             # Define class labels for COVID model
             self.covid_classes = ['COVID-19', 'Normal', 'Pneumonia']
             
@@ -125,6 +130,18 @@ class GPUModelLoader:
                 transforms.Normalize(mean=[0.485], std=[0.229])
             ])
             self.initialized = True
+
+    def get_loaded_models(self):
+        """Get list of currently loaded models"""
+        return list(self.models.keys())
+
+    async def start_client_manager(self, server_url: str = None):
+        """Start the client manager"""
+        return await self.client_manager.start(self.get_loaded_models, server_url)
+
+    async def stop_client_manager(self):
+        """Stop the client manager"""
+        await self.client_manager.stop()
 
     def load_model_config(self, model_type: str) -> ModelConfig:
         """Load model configuration from JSON file"""
@@ -641,7 +658,33 @@ async def unload_models(model_type: Optional[str] = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Example usage if running as script
+ 
+# ... existing code ...
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import asyncio
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='GPU Load Server')
+    parser.add_argument('--gateway', type=str, default='localhost',
+                      help='IP address of the GPU server (default: localhost)')
+    args = parser.parse_args()
+    
+    # Set the server URL based on the gateway argument
+    server_url = f"http://{args.gateway}"
+    print(f"Connecting to GPU server at: {server_url}")
+    
+    async def main():
+        # Start the client manager with the specified server URL
+        await gpu_loader.start_client_manager(server_url)
+        
+        # Start the FastAPI server
+        config = uvicorn.Config(app, host="0.0.0.0", port=8000)
+        server = uvicorn.Server(config)
+        await server.serve()
+        
+        # Stop the client manager when the server stops
+        await gpu_loader.stop_client_manager()
+
+    asyncio.run(main())
