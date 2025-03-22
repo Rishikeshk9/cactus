@@ -1,3 +1,5 @@
 /model_weights
 config.py
 /__pycache__
+/rust/target
+/rust/Cargo.lock 
