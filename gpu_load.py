@@ -19,6 +19,7 @@ import base64
 from fastapi.middleware.cors import CORSMiddleware
 from gpu_client import GPUClientManager
 import argparse
+from pathlib import Path
 
 app = FastAPI()
 
@@ -113,11 +114,24 @@ class GPUModelLoader:
     def __init__(self):
         if not self.initialized:
             self.models = {}
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
             self.port = 8000  # Default port
             self.client_manager = None
             self.initialized = True
+            self.model_weights_dir = Path("model_weights")
+            self.models_config_dir = Path("models_config")
+            self.model_weights_dir.mkdir(exist_ok=True)
+            self.models_config_dir.mkdir(exist_ok=True)
+            self._load_model_configs()
+            self._load_model_weights()
+            self._load_models()
+
+    def get_device_info(self):
+        """Get information about the current device."""
+        if torch.cuda.is_available():
+            return f"CUDA ({torch.cuda.get_device_name(0)})"
+        return "CPU"
 
     def get_loaded_models(self):
         """Get list of currently loaded models"""
@@ -624,7 +638,7 @@ async def model_status():
     return {
         "models_loaded": list(gpu_loader.models.keys()),
         "device": gpu_loader.device,
-        "device_type": "GPU" if gpu_loader.device == "cuda" else "CPU"
+        "device_type": gpu_loader.get_device_info()
     }
 
 @app.post("/unload")

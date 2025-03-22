@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 import aiohttp
 import threading
+import json
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -51,8 +52,9 @@ class ClientRegistry:
     def __init__(self):
         self.clients: Dict[str, GPUClient] = {}
         self.heartbeat_timeout = 30  # seconds
-        self._lock = asyncio.Lock()  # Use asyncio.Lock instead of threading.Lock
-        self._cleanup_lock = asyncio.Lock()  # Use asyncio.Lock instead of threading.Lock
+        self._lock = asyncio.Lock()  # Lock for client registration/updates
+        self._search_lock = asyncio.Lock()  # Separate lock for client search
+        self._cleanup_lock = asyncio.Lock()  # Lock for cleanup operations
         logger.info("Initialized ClientRegistry")
 
     async def register_client(self, client: GPUClient):
@@ -115,24 +117,22 @@ class ClientRegistry:
                 logger.warning(f"Client not found for removal: {client_id}")
 
     async def get_active_clients(self) -> List[GPUClient]:
-        async with self._lock:
-            current_time = datetime.now()
-            active_clients = []
-            
-            logger.info(f"Checking active clients at {current_time}")
-            
-            # Create a copy of the clients dictionary to avoid modification during iteration
-            clients_copy = dict(self.clients)
-            
-            for client_id, client in clients_copy.items():
-                try:
+        """Get list of active clients without modifying the registry"""
+        current_time = datetime.now()
+        active_clients = []
+        
+        # Create a copy of the clients dictionary to avoid modification during iteration
+        clients_copy = dict(self.clients)
+        
+        for client_id, client in clients_copy.items():
+            try:
+                time_diff = (current_time - client.get_last_heartbeat()).seconds
+                if time_diff < self.heartbeat_timeout:
                     active_clients.append(client)
-                    
-                except Exception as e:
-                    logger.error(f"Error processing client {client_id}: {str(e)}")
-            
-            logger.info(f"Found {len(active_clients)} active clients")
-            return active_clients
+            except Exception as e:
+                logger.error(f"Error processing client {client_id}: {str(e)}")
+        
+        return active_clients
 
     async def cleanup_inactive_clients(self):
         """Separate method to clean up inactive clients"""
@@ -169,34 +169,38 @@ class ClientRegistry:
 
     async def find_best_client(self, model_type: str) -> Optional[GPUClient]:
         """Find the best available client for the requested model type"""
-        async with self._lock:
-            active_clients = await self.get_active_clients()
-            logger.info(f"Looking for client with model: {model_type}")
-            logger.info(f"Active clients: {[c.client_id for c in active_clients]}")
-            
-            # First try to find a client that already has the model loaded
-            for client in active_clients:
-                if model_type in client.loaded_models:
-                    logger.info(f"Found client {client.client_id} with model {model_type} already loaded")
-                    return client
-            
-            # If no client has the model loaded, find the one with the most free memory
-            best_client = None
-            max_free_memory = 0
-            
-            for client in active_clients:
-                if client.status == "active":
-                    free_memory = client.gpu_info.get("free_memory", 0)
-                    if free_memory > max_free_memory:
-                        max_free_memory = free_memory
-                        best_client = client
-            
-            if best_client:
-                logger.info(f"Selected client {best_client.client_id} with {max_free_memory}GB free memory")
-            else:
-                logger.warning("No suitable client found")
-            
-            return best_client
+        try:
+            async with self._search_lock:
+                logger.info(f"Starting client search for model: {model_type}")
+                active_clients = await self.get_active_clients()
+                logger.info(f"Found {len(active_clients)} active clients")
+                
+                if not active_clients:
+                    logger.warning("No active clients found")
+                    return None
+                
+                # First try to find a client that already has the model loaded
+                for client in active_clients:
+                    logger.debug(f"Checking client {client.client_id} with models: {client.loaded_models}")
+                    if model_type in client.loaded_models:
+                        logger.info(f"Found client {client.client_id} with model {model_type} already loaded")
+                        return client
+                
+                # If no client has the model loaded, find any client with GPU capabilities
+                for client in active_clients:
+                    if client.status == "active":
+                        # Check if client has GPU capabilities
+                        gpu_info = client.gpu_info
+                        if gpu_info and gpu_info.get("device_name") and gpu_info.get("total_memory", 0) > 0:
+                            logger.info(f"Selected client {client.client_id} with GPU: {gpu_info.get('device_name')}")
+                            return client
+                
+                logger.warning("No suitable client with GPU capabilities found")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error in find_best_client: {str(e)}")
+            return None
 
     async def print_clients_table(self):
         """Print a formatted table of all connected clients"""
@@ -334,49 +338,92 @@ async def remove_client(client_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/predict")
-async def predict(request: PredictionRequest):
+async def predict(request: Request):
     """Handle prediction requests and route them to appropriate clients"""
-    logger.info(f"Received prediction request for model: {request.model_type}")
-    
-    # Find the best available client
-    client = await registry.find_best_client(request.model_type)
-    if not client:
-        raise HTTPException(status_code=503, detail="No suitable client available")
-    
-    # Forward the request to the selected client
-    client_url = f"http://{client.ip_address}:{client.port}/predict"
-    logger.info(f"Forwarding request to client: {client_url}")
-    
     try:
+        # Get raw request data
+        request_data = await request.json()
+        logger.info(f"Received prediction request data: {request_data}")
+        
+        # Extract required fields with defaults
+        model_type = request_data.get("model_type")
+        if not model_type:
+            raise HTTPException(status_code=400, detail="model_type is required")
+            
+        model_cid = request_data.get("model_cid", "")
+        prompt = request_data.get("prompt", "")
+        inference_steps = request_data.get("inference_steps", 30)
+        guidance_scale = request_data.get("guidance_scale", 7.5)
+        callback_url = request_data.get("callback_url")
+        image_data = request_data.get("image_data")
+        image_url = request_data.get("image_url")
+        
+        logger.info(f"Processing request for model: {model_type}")
+        
+        # Find the best available client with timeout
+        try:
+            client = await asyncio.wait_for(registry.find_best_client(model_type), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.error("Timeout while finding best client")
+            raise HTTPException(status_code=503, detail="Timeout while finding suitable client")
+            
+        if not client:
+            logger.error("No suitable client found")
+            raise HTTPException(status_code=503, detail="No suitable client available")
+        
+        # Forward the request to the selected client
+        client_url = f"http://{client.ip_address}:{client.port}/predict"
+        logger.info(f"Forwarding request to client: {client_url}")
+        
         # Prepare the request data
-        request_data = request.dict()
+        forward_data = {
+            "model_type": model_type,
+            "model_cid": model_cid,
+            "prompt": prompt,
+            "inference_steps": inference_steps,
+            "guidance_scale": guidance_scale,
+            "callback_url": callback_url,
+            "image_data": image_data,
+            "image_url": image_url
+        }
         
         # If we have image data, ensure it's properly formatted
-        if request_data.get("image_data"):
+        if forward_data.get("image_data"):
             # Ensure the base64 data is properly formatted
-            if not request_data["image_data"].startswith("data:image/"):
-                request_data["image_data"] = f"data:image/jpeg;base64,{request_data['image_data']}"
+            if not forward_data["image_data"].startswith("data:image/"):
+                forward_data["image_data"] = f"data:image/jpeg;base64,{forward_data['image_data']}"
         
+        logger.info(f"Forwarding data to client: {forward_data}")
+        
+        # Add timeout to the client request
         async with aiohttp.ClientSession() as session:
-            async with session.post(client_url, json=request_data) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    logger.info(f"Successfully received response from client {client.client_id}")
-                    return result
-                else:
-                    error_text = await response.text()
-                    logger.error(f"Client returned error: {response.status} - {error_text}")
-                    # If client returns error, try to find another client
-                    logger.info("Attempting to find another client...")
-                    client = await registry.find_best_client(request.model_type)
-                    if client and client.client_id != client.client_id:
-                        return await predict(request)  # Retry with new client
-                    raise HTTPException(status_code=response.status, detail=error_text)
+            try:
+                async with session.post(client_url, json=forward_data, timeout=30.0) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        logger.info(f"Successfully received response from client {client.client_id}")
+                        return result
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"Client returned error: {response.status} - {error_text}")
+                        # If client returns error, try to find another client
+                        logger.info("Attempting to find another client...")
+                        client = await registry.find_best_client(model_type)
+                        if client and client.client_id != client.client_id:
+                            return await predict(request)  # Retry with new client
+                        raise HTTPException(status_code=response.status, detail=error_text)
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout while waiting for client {client.client_id} response")
+                raise HTTPException(status_code=504, detail="Client request timeout")
+                
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in request: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid JSON in request")
     except Exception as e:
-        logger.error(f"Error forwarding request to client: {str(e)}")
+        logger.error(f"Error processing request: {str(e)}")
         # If request fails, try to find another client
         logger.info("Attempting to find another client...")
-        client = await registry.find_best_client(request.model_type)
+        client = await registry.find_best_client(model_type)
         if client and client.client_id != client.client_id:
             return await predict(request)  # Retry with new client
         raise HTTPException(status_code=500, detail=str(e))

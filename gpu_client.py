@@ -19,11 +19,11 @@ class DateTimeEncoder(json.JSONEncoder):
         return super().default(obj)
 
 class GPUClientManager:
-    def __init__(self, server_url: str = "http://localhost:8001", port: int = 8000):
+    def __init__(self, server_url: str = "http://127.0.0.1:8001", port: int = 8000):
         self.server_url = server_url
         self.client_id = str(uuid.uuid4())
         self.ip_address = self._get_local_ip()
-        self.port = port  # Use the provided port
+        self.port = port
         self.session: Optional[aiohttp.ClientSession] = None
         self.heartbeat_task: Optional[asyncio.Task] = None
         self.is_running = False
@@ -81,17 +81,21 @@ class GPUClientManager:
             self.session = aiohttp.ClientSession()
             logger.info("Created new aiohttp session")
 
+        gpu_info = self._get_gpu_info()
+        gpu_available = gpu_info["device_name"] != "CPU"
+
         client_data = {
             "client_id": self.client_id,
             "ip_address": self.ip_address,
             "port": self.port,
-            "gpu_info": self._get_gpu_info(),
+            "gpu_info": gpu_info,
             "loaded_models": loaded_models,
             "last_heartbeat": datetime.now().isoformat(),
             "status": "active",
             "capabilities": {
+                "models": ["stable_diffusion", "covid_xray"],
+                "gpu_available": gpu_available,
                 "max_batch_size": 1,
-                "supported_models": ["stable_diffusion", "stable_diffusion_xl"],
                 "max_resolution": 1024
             }
         }
@@ -147,7 +151,10 @@ class GPUClientManager:
         while self.is_running:
             try:
                 loaded_models = loaded_models_callback()
-                await self.send_heartbeat(loaded_models)
+                success = await self.send_heartbeat(loaded_models)
+                if not success:
+                    logger.warning("Heartbeat failed, attempting to reconnect...")
+                    await self.start(loaded_models_callback)
                 await asyncio.sleep(10)  # Send heartbeat every 10 seconds
             except Exception as e:
                 logger.error(f"Error in heartbeat loop: {str(e)}")
@@ -157,39 +164,49 @@ class GPUClientManager:
         """Start the client manager"""
         if server_url:
             self.server_url = server_url
+            logger.info(f"Using provided server URL: {self.server_url}")
             
-        self.session = aiohttp.ClientSession()
-        self.is_running = True
-        
-        # Register with the server
-        client_data = {
-            "client_id": self.client_id,
-            "ip_address": self.ip_address,
-            "port": self.port,
-            "gpu_info": self._get_gpu_info(),
-            "loaded_models": get_loaded_models_func(),
-            "last_heartbeat": datetime.now().isoformat(),
-            "status": "active",
-            "capabilities": {
-                "models": ["stable_diffusion", "covid_xray"],
-                "gpu_available": torch.cuda.is_available()
-            }
-        }
-        
         try:
+            # Create new session
+            self.session = aiohttp.ClientSession()
+            logger.info("Created new aiohttp session")
+            
+            self.is_running = True
+            
+            # Register with the server
+            client_data = {
+                "client_id": self.client_id,
+                "ip_address": self.ip_address,
+                "port": self.port,
+                "gpu_info": self._get_gpu_info(),
+                "loaded_models": get_loaded_models_func(),
+                "last_heartbeat": datetime.now().isoformat(),
+                "status": "active",
+                "capabilities": {
+                    "models": ["stable_diffusion", "covid_xray"],
+                    "gpu_available": torch.cuda.is_available()
+                }
+            }
+            
+            logger.info(f"Attempting to register with server at {self.server_url}/register")
             async with self.session.post(f"{self.server_url}/register", json=client_data) as response:
                 if response.status == 200:
                     logger.info("Successfully registered with server")
                 else:
-                    logger.error(f"Failed to register with server: {response.status}")
+                    error_text = await response.text()
+                    logger.error(f"Failed to register with server: {response.status} - {error_text}")
                     return False
+            
+            # Start heartbeat task
+            self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(get_loaded_models_func))
+            logger.info("Started heartbeat task")
+            return True
+            
         except Exception as e:
-            logger.error(f"Error registering with server: {str(e)}")
+            logger.error(f"Error starting client manager: {str(e)}")
+            if self.session:
+                await self.session.close()
             return False
-        
-        # Start heartbeat task with the correct method name
-        self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(get_loaded_models_func))
-        return True
 
     async def stop(self):
         """Stop the client manager"""
