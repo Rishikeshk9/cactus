@@ -68,7 +68,16 @@ unsafe impl Sync for ClientError {}
 impl GPUClient {
     pub async fn send_prediction_request(&self, request: PredictionRequest) -> Result<PredictionResponse, ClientError> {
         let client = Client::new();
-        let url = format!("http://{}:{}/predict", self.ip_address, self.port);
+        
+        // Check if this is a domain name (contains dots) or an IP address
+        let url = if self.ip_address.contains('.') && !self.ip_address.chars().all(|c| c.is_digit(10) || c == '.') {
+            // For domain names, use https and don't append port
+            format!("https://{}/predict", self.ip_address)
+        } else {
+            // For IP addresses, use http and append port
+            format!("http://{}:{}/predict", self.ip_address, self.port)
+        };
+        
         tracing::info!("Forwarding prediction request to client at URL: {}", url);
         
         // Validate request based on model type

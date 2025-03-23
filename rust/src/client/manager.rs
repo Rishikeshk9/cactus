@@ -2,7 +2,7 @@ use crate::protocol::types::{ClientCapabilities, GPUClient, GPUInfo, HeartbeatUp
 use anyhow::Result;
 use chrono::Utc;
 use reqwest::Client;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -18,6 +18,8 @@ use axum::{
 };
 use pyo3::prelude::*;
 use std::collections::HashMap;
+use std::process::Command;
+use std::process::Child;
 
 #[derive(Clone)]
 pub struct GPUClientManager {
@@ -29,6 +31,8 @@ pub struct GPUClientManager {
     running: Arc<AtomicBool>,
     model_loaded: Arc<AtomicBool>,
     model_manager: Arc<Mutex<ModelManager>>,
+    ngrok_process: Arc<Mutex<Option<Child>>>,
+    ngrok_url: Arc<Mutex<Option<String>>>,
 }
 
 impl GPUClientManager {
@@ -46,11 +50,21 @@ impl GPUClientManager {
             running: Arc::new(AtomicBool::new(false)),
             model_loaded: Arc::new(AtomicBool::new(false)),
             model_manager: Arc::new(Mutex::new(ModelManager::new())),
+            ngrok_process: Arc::new(Mutex::new(None)),
+            ngrok_url: Arc::new(Mutex::new(None)),
         })
     }
 
     pub async fn start(&mut self) -> Result<()> {
         self.running.store(true, Ordering::SeqCst);
+        
+        // Get ngrok URL before registration
+        let ngrok_url = get_ngrok_url(&self.ngrok_process).await?;
+        tracing::info!("Got ngrok URL: {}", ngrok_url);
+        
+        // Store the ngrok URL
+        *self.ngrok_url.lock().await = Some(ngrok_url.clone());
+        
         self.register().await?;
         
         // Start the prediction server
@@ -59,8 +73,8 @@ impl GPUClientManager {
             .route("/predict", post(predict))
             .with_state(manager);
             
-        let addr = (self.ip_addr, self.port);
-        tracing::info!("Starting prediction server on {}:{}", self.ip_addr, self.port);
+        let addr = (Ipv4Addr::new(127, 0, 0, 1), self.port);
+        tracing::info!("Starting prediction server on {}:{}", addr.0, addr.1);
         
         // Start both the heartbeat loop and the prediction server
         tokio::select! {
@@ -78,18 +92,14 @@ impl GPUClientManager {
             gpu_available: gpu_info.is_some(),
         };
 
-        // Fetch current public IP
-        let current_ip = match fetch_public_ip().await {
-            Ok(ip) => ip,
-            Err(e) => {
-                tracing::warn!("Failed to fetch public IP: {}. Using current IP.", e);
-                self.ip_addr.to_string()
-            }
-        };
+        // Get the ngrok URL
+        let ngrok_url = self.ngrok_url.lock().await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No ngrok URL available"))?;
 
         let client = GPUClient {
             client_id: self.client_id,
-            ip_address: current_ip,
+            ip_address: ngrok_url,
             port: self.port,
             gpu_info: gpu_info.unwrap_or_else(|| GPUInfo {
                 device_name: "CPU".to_string(),
@@ -109,7 +119,7 @@ impl GPUClientManager {
         tracing::info!(
             "Registering client {} at {}:{} with server at {}",
             self.client_id,
-            self.ip_addr,
+            client.ip_address,
             self.port,
             self.server_url
         );
@@ -139,21 +149,17 @@ impl GPUClientManager {
     }
 
     async fn send_heartbeat(&self) -> Result<()> {
-        // Fetch current public IP
-        let current_ip = match fetch_public_ip().await {
-            Ok(ip) => ip,
-            Err(e) => {
-                tracing::warn!("Failed to fetch public IP: {}. Using current IP.", e);
-                self.ip_addr.to_string()
-            }
-        };
+        // Get the ngrok URL
+        let ngrok_url = self.ngrok_url.lock().await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No ngrok URL available"))?;
 
         let update = HeartbeatUpdate {
             client_id: self.client_id,
             loaded_models: vec![],
             status: "online".to_string(),
             last_heartbeat: Utc::now(),
-            ip_address: Some(current_ip),
+            ip_address: Some(ngrok_url),
         };
 
         self.session
@@ -167,6 +173,10 @@ impl GPUClientManager {
 
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
+        // Kill ngrok process if it exists
+        if let Some(mut process) = self.ngrok_process.blocking_lock().take() {
+            let _ = process.kill();
+        }
     }
 
     fn is_model_loaded(&self) -> bool {
@@ -618,4 +628,40 @@ async fn fetch_public_ip() -> Result<String> {
         .await?;
     let ip = response.text().await?;
     Ok(ip)
+}
+
+async fn get_ngrok_url(ngrok_process: &Arc<Mutex<Option<Child>>>) -> Result<String> {
+    // Start ngrok in the background
+    let process = Command::new("ngrok")
+        .arg("http")
+        .arg("8002")  // Your client's port
+        .spawn()?;
+
+    // Store the process handle
+    *ngrok_process.lock().await = Some(process);
+
+    // Wait a bit for ngrok to start
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Get the ngrok URL using the API
+    let client = Client::new();
+    let response = client.get("http://localhost:4040/api/tunnels")
+        .send()
+        .await?;
+    let tunnels: serde_json::Value = response.json().await?;
+    
+    // Extract the public URL
+    if let Some(tunnels) = tunnels.get("tunnels") {
+        if let Some(tunnel) = tunnels.get(0) {
+            if let Some(url) = tunnel.get("public_url") {
+                if let Some(url_str) = url.as_str() {
+                    // Remove the https:// prefix if present
+                    let url = url_str.replace("https://", "");
+                    return Ok(url);
+                }
+            }
+        }
+    }
+    
+    Err(anyhow::anyhow!("Failed to get ngrok URL"))
 } 
