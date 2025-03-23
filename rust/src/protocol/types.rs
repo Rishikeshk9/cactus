@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::collections::HashMap;
+use tracing;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GPUInfo {
@@ -68,6 +69,7 @@ impl GPUClient {
     pub async fn send_prediction_request(&self, request: PredictionRequest) -> Result<PredictionResponse, ClientError> {
         let client = Client::new();
         let url = format!("http://{}:{}/predict", self.ip_address, self.port);
+        tracing::info!("Forwarding prediction request to client at URL: {}", url);
         
         // Validate request based on model type
         match request.model_type {
@@ -150,6 +152,7 @@ pub struct HeartbeatUpdate {
     pub loaded_models: Vec<String>,
     pub status: String,
     pub last_heartbeat: DateTime<Utc>,
+    pub ip_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

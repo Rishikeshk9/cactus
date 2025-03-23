@@ -35,6 +35,9 @@ enum Commands {
         /// Port to bind to
         #[arg(short, long, default_value = "8002")]
         port: u16,
+        /// Public IP address of the client
+        #[arg(short = 'i', long)]
+        public_ip: Option<String>,
     },
 }
 
@@ -55,8 +58,8 @@ async fn main() -> Result<()> {
             let server = Server::new(host, port)?;
             server.run().await?;
         }
-        Commands::Client { server_url, port } => {
-            let mut client = GPUClientManager::new(server_url, port)?;
+        Commands::Client { server_url, port, public_ip } => {
+            let mut client = GPUClientManager::new(server_url, port, public_ip)?;
             let client_clone = client.clone();
 
             // Handle shutdown signals

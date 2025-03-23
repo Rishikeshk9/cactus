@@ -216,6 +216,7 @@ async fn predict(
                 status: "error".to_string(),
                 loaded_models: client.loaded_models.clone(),
                 last_heartbeat: Utc::now(),
+                ip_address: Some(client.ip_address.clone()),
             }).await {
                 tracing::warn!("Failed to update client status: {}", e);
             }

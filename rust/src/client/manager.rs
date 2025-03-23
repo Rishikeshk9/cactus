@@ -32,9 +32,9 @@ pub struct GPUClientManager {
 }
 
 impl GPUClientManager {
-    pub fn new(server_url: String, port: u16) -> Result<Self> {
+    pub fn new(server_url: String, port: u16, public_ip: Option<String>) -> Result<Self> {
         let client_id = Uuid::new_v4();
-        let ip_addr = get_local_ip()?;
+        let ip_addr = get_local_ip(public_ip)?;
         let session = Client::new();
 
         Ok(Self {
@@ -78,9 +78,18 @@ impl GPUClientManager {
             gpu_available: gpu_info.is_some(),
         };
 
+        // Fetch current public IP
+        let current_ip = match fetch_public_ip().await {
+            Ok(ip) => ip,
+            Err(e) => {
+                tracing::warn!("Failed to fetch public IP: {}. Using current IP.", e);
+                self.ip_addr.to_string()
+            }
+        };
+
         let client = GPUClient {
             client_id: self.client_id,
-            ip_address: self.ip_addr.to_string(),
+            ip_address: current_ip,
             port: self.port,
             gpu_info: gpu_info.unwrap_or_else(|| GPUInfo {
                 device_name: "CPU".to_string(),
@@ -130,11 +139,21 @@ impl GPUClientManager {
     }
 
     async fn send_heartbeat(&self) -> Result<()> {
+        // Fetch current public IP
+        let current_ip = match fetch_public_ip().await {
+            Ok(ip) => ip,
+            Err(e) => {
+                tracing::warn!("Failed to fetch public IP: {}. Using current IP.", e);
+                self.ip_addr.to_string()
+            }
+        };
+
         let update = HeartbeatUpdate {
             client_id: self.client_id,
             loaded_models: vec![],
             status: "online".to_string(),
             last_heartbeat: Utc::now(),
+            ip_address: Some(current_ip),
         };
 
         self.session
@@ -388,9 +407,13 @@ impl Drop for GPUClientManager {
     }
 }
 
-fn get_local_ip() -> Result<IpAddr> {
-    // For now, just return localhost
-    Ok("127.0.0.1".parse()?)
+fn get_local_ip(public_ip: Option<String>) -> Result<IpAddr> {
+    if let Some(ip) = public_ip {
+        Ok(ip.parse()?)
+    } else {
+        // For now, just return localhost if no public IP is provided
+        Ok("127.0.0.1".parse()?)
+    }
 }
 
 fn get_gpu_info() -> Result<Option<GPUInfo>> {
@@ -586,4 +609,13 @@ fn check_gpu_available() -> bool {
         }
         false
     })
+}
+
+async fn fetch_public_ip() -> Result<String> {
+    let client = Client::new();
+    let response = client.get("https://api.ipify.org")
+        .send()
+        .await?;
+    let ip = response.text().await?;
+    Ok(ip)
 } 
