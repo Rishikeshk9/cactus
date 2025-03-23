@@ -8,6 +8,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GPUInfo {
@@ -160,6 +161,10 @@ pub struct ServerResponse {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PredictionResponse {
     pub success: bool,
+    pub prompt: Option<String>,
+    pub generation_time_ms: Option<f64>,
+    pub parameters: Option<HashMap<String, f32>>,
+    pub timestamp: Option<String>,
     pub image_base64: Option<String>,
     pub error: Option<String>,
 }

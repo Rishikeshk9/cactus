@@ -17,6 +17,7 @@ use axum::{
     extract::{State, Json},
 };
 use pyo3::prelude::*;
+use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct GPUClientManager {
@@ -184,6 +185,10 @@ impl GPUClientManager {
                 tracing::error!("Failed to initialize Python module: {}", e);
                 return Ok(PredictionResponse {
                     success: false,
+                    prompt: None,
+                    generation_time_ms: None,
+                    parameters: None,
+                    timestamp: None,
                     image_base64: None,
                     error: Some(format!("Failed to initialize Python module: {}", e)),
                 });
@@ -195,46 +200,88 @@ impl GPUClientManager {
                 if let Some(image_url) = request.image_url {
                     // Handle COVID X-Ray prediction
                     tracing::info!("Loading COVID X-Ray model...");
-                    let _model = match model_manager.get_model(&request.model_cid).await {
-                        Ok(model) => model,
+                    match model_manager.load_covid_model(&request.model_cid).await {
+                        Ok(_) => {
+                            tracing::info!("COVID X-Ray model loaded successfully");
+                            
+                            // Get device info from Python
+                            let device_info = match model_manager.get_device_info().await {
+                                Ok(info) => info,
+                                Err(e) => {
+                                    tracing::error!("Failed to get device info: {}", e);
+                                    return Ok(PredictionResponse {
+                                        success: false,
+                                        prompt: None,
+                                        generation_time_ms: None,
+                                        parameters: None,
+                                        timestamp: None,
+                                        image_base64: None,
+                                        error: Some(format!("Failed to get device info: {}", e)),
+                                    });
+                                }
+                            };
+                            
+                            tracing::info!(
+                                "Processing COVID X-Ray image from {} using model on device: {}",
+                                image_url,
+                                device_info
+                            );
+                            
+                            // Process the X-ray image
+                            match model_manager.process_xray(&image_url).await {
+                                Ok(result) => {
+                                    // Convert probabilities to parameters format
+                                    let mut parameters = HashMap::new();
+                                    for (class, prob) in result.probabilities {
+                                        if let Ok(value) = prob.trim_end_matches('%').parse::<f32>() {
+                                            parameters.insert(class, value);
+                                        }
+                                    }
+                                    
+                                    Ok(PredictionResponse {
+                                        success: true,
+                                        prompt: None,
+                                        generation_time_ms: Some(result.prediction_time_ms),
+                                        parameters: Some(parameters),
+                                        timestamp: Some(result.timestamp),
+                                        image_base64: None,
+                                        error: None,
+                                    })
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to process X-ray image: {}", e);
+                                    Ok(PredictionResponse {
+                                        success: false,
+                                        prompt: None,
+                                        generation_time_ms: None,
+                                        parameters: None,
+                                        timestamp: None,
+                                        image_base64: None,
+                                        error: Some(format!("Failed to process X-ray image: {}", e)),
+                                    })
+                                }
+                            }
+                        }
                         Err(e) => {
                             tracing::error!("Failed to load COVID X-Ray model: {}", e);
-                            return Ok(PredictionResponse {
+                            Ok(PredictionResponse {
                                 success: false,
+                                prompt: None,
+                                generation_time_ms: None,
+                                parameters: None,
+                                timestamp: None,
                                 image_base64: None,
                                 error: Some(format!("Failed to load model: {}", e)),
-                            });
+                            })
                         }
-                    };
-                    
-                    // Get device info from Python
-                    let device_info = match model_manager.get_device_info().await {
-                        Ok(info) => info,
-                        Err(e) => {
-                            tracing::error!("Failed to get device info: {}", e);
-                            return Ok(PredictionResponse {
-                                success: false,
-                                image_base64: None,
-                                error: Some(format!("Failed to get device info: {}", e)),
-                            });
-                        }
-                    };
-                    
-                    tracing::info!(
-                        "Processing COVID X-Ray image from {} using model on device: {}",
-                        image_url,
-                        device_info
-                    );
-                    
-                    // TODO: Implement COVID X-Ray prediction logic
-                    Ok(PredictionResponse {
-                        success: true,
-                        image_base64: None,
-                        error: None,
-                    })
+                    }
                 } else {
                     Ok(PredictionResponse {
                         success: false,
+                        prompt: None,
+                        generation_time_ms: None,
+                        parameters: None,
+                        timestamp: None,
                         image_base64: None,
                         error: Some("image_url is required for COVID X-Ray model".to_string()),
                     })
@@ -258,6 +305,10 @@ impl GPUClientManager {
                             tracing::error!("Failed to load Stable Diffusion model: {}", e);
                             return Ok(PredictionResponse {
                                 success: false,
+                                prompt: None,
+                                generation_time_ms: None,
+                                parameters: None,
+                                timestamp: None,
                                 image_base64: None,
                                 error: Some(format!("Failed to load model: {}", e)),
                             });
@@ -266,16 +317,20 @@ impl GPUClientManager {
                     
                     // Generate the image
                     tracing::info!("Generating image...");
-                    let image = match model_manager.generate_image(
+                    let result = match model_manager.generate_image(
                         &prompt,
                         inference_steps,
                         guidance_scale,
                     ).await {
-                        Ok(image) => image,
+                        Ok(result) => result,
                         Err(e) => {
                             tracing::error!("Failed to generate image: {}", e);
                             return Ok(PredictionResponse {
                                 success: false,
+                                prompt: None,
+                                generation_time_ms: None,
+                                parameters: None,
+                                timestamp: None,
                                 image_base64: None,
                                 error: Some(format!("Failed to generate image: {}", e)),
                             });
@@ -284,12 +339,20 @@ impl GPUClientManager {
 
                     Ok(PredictionResponse {
                         success: true,
-                        image_base64: Some(image),
+                        prompt: Some(result.prompt),
+                        generation_time_ms: Some(result.generation_time_ms),
+                        parameters: Some(result.parameters),
+                        timestamp: Some(result.timestamp),
+                        image_base64: Some(result.generated_image),
                         error: None,
                     })
                 } else {
                     Ok(PredictionResponse {
                         success: false,
+                        prompt: None,
+                        generation_time_ms: None,
+                        parameters: None,
+                        timestamp: None,
                         image_base64: None,
                         error: Some("prompt and quality_preset are required for Stable Diffusion model".to_string()),
                     })
@@ -308,6 +371,10 @@ async fn predict(
         Ok(response) => Json(response),
         Err(e) => Json(PredictionResponse {
             success: false,
+            prompt: None,
+            generation_time_ms: None,
+            parameters: None,
+            timestamp: None,
             image_base64: None,
             error: Some(e.to_string()),
         }),

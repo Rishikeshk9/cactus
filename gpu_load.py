@@ -1,3 +1,11 @@
+
+print(">>> gpu_load.py Loading...")
+import sys
+import os
+
+# Add the directory of this file (i.e., protocol/) to sys.path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import os
 import torch
 import requests
@@ -20,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from gpu_client import GPUClientManager
 import argparse
 from pathlib import Path
+
 
 app = FastAPI()
 
