@@ -4,3 +4,4 @@ config.py
 /rust/target
 /rust/Cargo.lock 
 /rust/model_weights
+/contrasts/build

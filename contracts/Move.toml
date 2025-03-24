@@ -1,0 +1,11 @@
+[package]
+name = "Cactus"
+version = "0.1.0"
+
+[dependencies]
+AptosFramework = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-framework/", rev = "main" }
+AptosStdlib = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-stdlib/", rev = "main" }
+AptosToken = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-token/", rev = "main" }
+
+[addresses]
+cactus = "0x115d1fc0753e8cb7b61cbff6590275e59b64d8988fa7ab375656a0c29d24ae8f"  # Updated to your account address 
