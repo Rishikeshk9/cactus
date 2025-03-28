@@ -72,7 +72,7 @@ impl GPUClient {
         // Check if this is a domain name (contains dots) or an IP address
         let url = if self.ip_address.contains('.') && !self.ip_address.chars().all(|c| c.is_digit(10) || c == '.') {
             // For domain names, use https and don't append port
-            format!("https://{}/predict", self.ip_address)
+            format!("http://{}/predict", self.ip_address)
         } else {
             // For IP addresses, use http and append port
             format!("http://{}:{}/predict", self.ip_address, self.port)

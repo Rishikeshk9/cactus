@@ -51,19 +51,12 @@ impl GPUClientManager {
             model_loaded: Arc::new(AtomicBool::new(false)),
             model_manager: Arc::new(Mutex::new(ModelManager::new())),
             ngrok_process: Arc::new(Mutex::new(None)),
-            ngrok_url: Arc::new(Mutex::new(None)),
+            ngrok_url: Arc::new(Mutex::new(Some(format!("{}:{}", ip_addr, port)))),
         })
     }
 
     pub async fn start(&mut self) -> Result<()> {
         self.running.store(true, Ordering::SeqCst);
-        
-        // Get ngrok URL before registration
-        let ngrok_url = get_ngrok_url(&self.ngrok_process).await?;
-        tracing::info!("Got ngrok URL: {}", ngrok_url);
-        
-        // Store the ngrok URL
-        *self.ngrok_url.lock().await = Some(ngrok_url.clone());
         
         self.register().await?;
         
@@ -92,14 +85,10 @@ impl GPUClientManager {
             gpu_available: gpu_info.is_some(),
         };
 
-        // Get the ngrok URL
-        let ngrok_url = self.ngrok_url.lock().await
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No ngrok URL available"))?;
-
+        // Use direct IP and port instead of ngrok URL
         let client = GPUClient {
             client_id: self.client_id,
-            ip_address: ngrok_url,
+            ip_address: format!("{}:{}", self.ip_addr, self.port),
             port: self.port,
             gpu_info: gpu_info.unwrap_or_else(|| GPUInfo {
                 device_name: "CPU".to_string(),
@@ -149,17 +138,12 @@ impl GPUClientManager {
     }
 
     async fn send_heartbeat(&self) -> Result<()> {
-        // Get the ngrok URL
-        let ngrok_url = self.ngrok_url.lock().await
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No ngrok URL available"))?;
-
         let update = HeartbeatUpdate {
             client_id: self.client_id,
             loaded_models: vec![],
             status: "online".to_string(),
             last_heartbeat: Utc::now(),
-            ip_address: Some(ngrok_url),
+            ip_address: Some(format!("{}:{}", self.ip_addr, self.port)),
         };
 
         self.session
@@ -173,10 +157,6 @@ impl GPUClientManager {
 
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
-        // Kill ngrok process if it exists
-        if let Some(mut process) = self.ngrok_process.blocking_lock().take() {
-            let _ = process.kill();
-        }
     }
 
     fn is_model_loaded(&self) -> bool {
@@ -428,12 +408,20 @@ fn get_local_ip(public_ip: Option<String>) -> Result<IpAddr> {
 
 fn get_gpu_info() -> Result<Option<GPUInfo>> {
     Python::with_gil(|py| {
-        // Import torch module
+        // Import torch module with better error handling
         let torch = match py.import("torch") {
             Ok(module) => module,
             Err(e) => {
-                tracing::error!("Failed to import torch: {}", e);
-                return Ok(None);
+                tracing::warn!("PyTorch is not installed. Please install it using: pip install torch");
+                return Ok(Some(GPUInfo {
+                    device_name: "CPU".to_string(),
+                    total_memory: 0.0,
+                    allocated_memory: 0.0,
+                    reserved_memory: 0.0,
+                    free_memory: 0.0,
+                    cuda_version: "N/A".to_string(),
+                    compute_capability: "N/A".to_string(),
+                }));
             }
         };
 
@@ -628,40 +616,4 @@ async fn fetch_public_ip() -> Result<String> {
         .await?;
     let ip = response.text().await?;
     Ok(ip)
-}
-
-async fn get_ngrok_url(ngrok_process: &Arc<Mutex<Option<Child>>>) -> Result<String> {
-    // Start ngrok in the background
-    let process = Command::new("ngrok")
-        .arg("http")
-        .arg("8002")  // Your client's port
-        .spawn()?;
-
-    // Store the process handle
-    *ngrok_process.lock().await = Some(process);
-
-    // Wait a bit for ngrok to start
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Get the ngrok URL using the API
-    let client = Client::new();
-    let response = client.get("http://localhost:4040/api/tunnels")
-        .send()
-        .await?;
-    let tunnels: serde_json::Value = response.json().await?;
-    
-    // Extract the public URL
-    if let Some(tunnels) = tunnels.get("tunnels") {
-        if let Some(tunnel) = tunnels.get(0) {
-            if let Some(url) = tunnel.get("public_url") {
-                if let Some(url_str) = url.as_str() {
-                    // Remove the https:// prefix if present
-                    let url = url_str.replace("https://", "");
-                    return Ok(url);
-                }
-            }
-        }
-    }
-    
-    Err(anyhow::anyhow!("Failed to get ngrok URL"))
 } 

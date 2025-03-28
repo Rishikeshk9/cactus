@@ -5,3 +5,5 @@ config.py
 /rust/Cargo.lock 
 /rust/model_weights
 /contrasts/build
+./cactus.pem
+cactus.pem
