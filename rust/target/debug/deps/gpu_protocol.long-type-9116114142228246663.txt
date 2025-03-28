@@ -1,1 +1,0 @@
-fn(State<Arc<ClientRegistry>>, Json<PredictionRequest>) -> impl std::future::Future<Output = Result<Json<PredictionResponse>, PredictionError>> {server::predict}

@@ -1,1 +1,0 @@
-fn(axum::extract::State<Arc<ClientRegistry>>, Json<PredictionRequest>) -> impl std::future::Future<Output = axum::http::Response<axum::body::Body>> {server::predict}
