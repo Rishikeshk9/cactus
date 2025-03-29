@@ -7,12 +7,12 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub struct ModelManager {
-    loaded_models: HashMap<String, LoadedModel>,
+    pub loaded_models: HashMap<String, LoadedModel>,
     python_module: Arc<Mutex<Option<Py<PyAny>>>>,
     initialized: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub struct LoadedModel {
     pub model_type: String,
     pub device: String,
@@ -458,5 +458,13 @@ impl ModelManager {
                 Err(anyhow::anyhow!("Python module not initialized"))
             }
         })
+    }
+
+    pub fn get_model_cid(&self, model_type: &str) -> Option<String> {
+        self.loaded_models.get(model_type).map(|model| model.model_cid.clone())
+    }
+
+    pub fn get_loaded_models(&self) -> Vec<String> {
+        self.loaded_models.keys().cloned().collect()
     }
 } 

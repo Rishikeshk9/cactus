@@ -38,6 +38,7 @@ impl ClientRegistry {
             client.loaded_models = update.loaded_models;
             client.status = update.status;
             client.last_heartbeat = update.last_heartbeat;
+            client.capabilities = update.capabilities;
             if let Some(ip) = update.ip_address {
                 client.ip_address = ip;
             }

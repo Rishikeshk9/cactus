@@ -1,6 +1,6 @@
 use crate::protocol::types::{ClientCapabilities, GPUClient, GPUInfo, HeartbeatUpdate, PredictionRequest, PredictionResponse, ModelType};
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Utc, DateTime};
 use reqwest::Client;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -13,12 +13,13 @@ use tokio::sync::Mutex;
 use tracing;
 use axum::{
     Router,
-    routing::post,
+    routing::{post, get},
     extract::{State, Json},
+    response::IntoResponse,
 };
 use pyo3::prelude::*;
 use std::collections::HashMap;
-use std::process::Command;
+use serde::Serialize;
 use std::process::Child;
 
 #[derive(Clone)]
@@ -62,11 +63,26 @@ impl GPUClientManager {
         
         // Start the prediction server
         let manager = Arc::new(self.clone());
+        let client_id = self.client_id;
+        let ip_addr = self.ip_addr.to_string();
+        let port = self.port;
+        
         let app = Router::new()
             .route("/predict", post(predict))
+            .route("/health", get(health_check))
+            .route("/status", get(move || async move {
+                Json(ClientStatus {
+                    client_id,
+                    ip_address: ip_addr,
+                    port,
+                    status: "active".to_string(),
+                    last_heartbeat: Utc::now(),
+                    loaded_models: Vec::new(),
+                })
+            }))
             .with_state(manager);
             
-        let addr = (Ipv4Addr::new(127, 0, 0, 1), self.port);
+        let addr = (Ipv4Addr::new(0, 0, 0, 0), self.port);
         tracing::info!("Starting prediction server on {}:{}", addr.0, addr.1);
         
         // Start both the heartbeat loop and the prediction server
@@ -80,15 +96,24 @@ impl GPUClientManager {
 
     async fn register(&self) -> Result<()> {
         let gpu_info = get_gpu_info()?;
+        let model_manager = self.model_manager.lock().await;
+        let mut model_cids = HashMap::new();
+        
+        // Get loaded models and their CIDs
+        for (model_type, model) in &model_manager.loaded_models {
+            model_cids.insert(model_type.clone(), model.model_cid.clone());
+        }
+
         let capabilities = ClientCapabilities {
             models: vec!["stable_diffusion".to_string()],
+            model_cids,
             gpu_available: gpu_info.is_some(),
         };
 
         // Use direct IP and port instead of ngrok URL
         let client = GPUClient {
             client_id: self.client_id,
-            ip_address: format!("{}:{}", self.ip_addr, self.port),
+            ip_address: format!("{}", self.ip_addr),
             port: self.port,
             gpu_info: gpu_info.unwrap_or_else(|| GPUInfo {
                 device_name: "CPU".to_string(),
@@ -138,12 +163,25 @@ impl GPUClientManager {
     }
 
     async fn send_heartbeat(&self) -> Result<()> {
+        let model_manager = self.model_manager.lock().await;
+        let mut model_cids = HashMap::new();
+        
+        // Get loaded models and their CIDs
+        for (model_type, model) in &model_manager.loaded_models {
+            model_cids.insert(model_type.clone(), model.model_cid.clone());
+        }
+
         let update = HeartbeatUpdate {
             client_id: self.client_id,
-            loaded_models: vec![],
+            loaded_models: model_manager.get_loaded_models(),
             status: "online".to_string(),
             last_heartbeat: Utc::now(),
             ip_address: Some(format!("{}:{}", self.ip_addr, self.port)),
+            capabilities: ClientCapabilities {
+                models: model_manager.get_loaded_models(),
+                model_cids,
+                gpu_available: check_gpu_available(),
+            },
         };
 
         self.session
@@ -369,24 +407,72 @@ impl GPUClientManager {
             }
         }
     }
+
+    async fn start_prediction_server(&self) -> Result<()> {
+        let manager = Arc::new(self.clone());
+        let client_id = self.client_id;
+        let ip_addr = self.ip_addr.to_string();
+        let port = self.port;
+        
+        let app = Router::new()
+            .route("/predict", post(predict))
+            .route("/health", get(health_check))
+            .route("/status", get(move || async move {
+                tracing::info!("Received status request");
+                Json(ClientStatus {
+                    client_id,
+                    ip_address: ip_addr,
+                    port,
+                    status: "active".to_string(),
+                    last_heartbeat: Utc::now(),
+                    loaded_models: Vec::new(),
+                })
+            }))
+            .with_state(manager);
+
+        // Bind to all interfaces (both IPv4 and IPv6)
+        let addr = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+            self.port
+        );
+        tracing::info!("Starting prediction server on {}", addr);
+        
+        // Create a TcpListener with specific socket options
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        tracing::info!("Server is listening for connections");
+        
+        axum::serve(listener, app).await?;
+
+        Ok(())
+    }
 }
 
 // Move predict function outside impl block
 async fn predict(
     State(manager): State<Arc<GPUClientManager>>,
     Json(request): Json<PredictionRequest>,
-) -> Json<PredictionResponse> {
+) -> impl IntoResponse {
     match manager.handle_prediction_request(request).await {
-        Ok(response) => Json(response),
-        Err(e) => Json(PredictionResponse {
-            success: false,
-            prompt: None,
-            generation_time_ms: None,
-            parameters: None,
-            timestamp: None,
-            image_base64: None,
-            error: Some(e.to_string()),
-        }),
+        Ok(response) => {
+            tracing::info!("Received prediction response from client {}", manager.client_id);
+            Json(response)
+        }
+        Err(_e) => {
+            tracing::error!(
+                "Error getting prediction from client {}: {}",
+                manager.client_id,
+                _e
+            );
+            Json(PredictionResponse {
+                success: false,
+                prompt: None,
+                generation_time_ms: None,
+                parameters: None,
+                timestamp: None,
+                image_base64: None,
+                error: Some(_e.to_string()),
+            })
+        }
     }
 }
 
@@ -616,4 +702,18 @@ async fn fetch_public_ip() -> Result<String> {
         .await?;
     let ip = response.text().await?;
     Ok(ip)
+}
+
+async fn health_check() -> &'static str {
+    "OK"
+}
+
+#[derive(Serialize)]
+struct ClientStatus {
+    client_id: Uuid,
+    ip_address: String,
+    port: u16,
+    status: String,
+    last_heartbeat: DateTime<Utc>,
+    loaded_models: Vec<String>,
 } 

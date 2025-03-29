@@ -25,6 +25,7 @@ pub struct GPUInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientCapabilities {
     pub models: Vec<String>,
+    pub model_cids: HashMap<String, String>,  // Maps model_type to model_cid
     pub gpu_available: bool,
 }
 
@@ -162,6 +163,7 @@ pub struct HeartbeatUpdate {
     pub status: String,
     pub last_heartbeat: DateTime<Utc>,
     pub ip_address: Option<String>,
+    pub capabilities: ClientCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
