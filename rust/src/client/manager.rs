@@ -159,7 +159,7 @@ impl GPUClientManager {
     async fn heartbeat_loop(&self) -> Result<()> {
         while self.running.load(Ordering::SeqCst) {
             self.send_heartbeat().await?;
-            time::sleep(Duration::from_secs(10)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
         Ok(())
     }
