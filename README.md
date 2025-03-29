@@ -186,3 +186,5 @@ The `cactus_payment.move` contract implements:
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details. 
+
+cargo run -- client --server-url http://3.110.255.211:8001 --public-ip 3.110.255.211 --port 8002

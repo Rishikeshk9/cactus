@@ -57,8 +57,8 @@ impl Server {
             .layer(cors)
             .with_state(registry);
 
-        let addr: SocketAddr = format!("{}:{}", self.host, self.port).parse()?;
-        tracing::info!("Starting server on {}", addr);
+            let addr: SocketAddr = format!("0.0.0.0:{}", self.port).parse()?;
+            tracing::info!("Starting server on {}", addr);
 
         axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
         Ok(())
