@@ -240,11 +240,16 @@ impl ModelManager {
                 .ok_or_else(|| anyhow::anyhow!("device key not found in status dict"))?
                 .extract()?;
             
-            Ok(LoadedModel {
+            let model = LoadedModel {
                 device,
                 model_type: "stable_diffusion".to_string(),
                 model_cid: model_cid.to_string(),
-            })
+            };
+
+            // Add the model to loaded_models
+            self.loaded_models.insert(model.model_type.clone(), model.clone());
+            
+            Ok(model)
         })
     }
 
@@ -354,7 +359,7 @@ impl ModelManager {
         Ok(())
     }
 
-    pub async fn load_covid_model(&self, model_cid: &str) -> Result<()> {
+    pub async fn load_covid_model(&mut self, model_cid: &str) -> Result<()> {
         let module = self.python_module.lock().await;
         
         Python::with_gil(|py| {
@@ -366,6 +371,19 @@ impl ModelManager {
                 if !success {
                     return Err(anyhow::anyhow!("Failed to load COVID-19 model"));
                 }
+
+                // Get device info
+                let device_info = module
+                    .call_method0(py, "get_device_info")?
+                    .extract::<String>(py)?;
+
+                // Add the model to loaded_models
+                let model = LoadedModel {
+                    device: device_info,
+                    model_type: "covid_xray".to_string(),
+                    model_cid: model_cid.to_string(),
+                };
+                self.loaded_models.insert(model.model_type.clone(), model);
                 
                 Ok(())
             } else {

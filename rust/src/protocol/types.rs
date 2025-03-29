@@ -164,6 +164,7 @@ pub struct HeartbeatUpdate {
     pub last_heartbeat: DateTime<Utc>,
     pub ip_address: Option<String>,
     pub capabilities: ClientCapabilities,
+    pub gpu_info: GPUInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

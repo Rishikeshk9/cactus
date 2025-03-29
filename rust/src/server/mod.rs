@@ -218,6 +218,7 @@ async fn predict(
                 last_heartbeat: Utc::now(),
                 ip_address: Some(client.ip_address.clone()),
                 capabilities: client.capabilities.clone(),
+                gpu_info: client.gpu_info.clone(),
             }).await {
                 tracing::warn!("Failed to update client status: {}", e);
             }

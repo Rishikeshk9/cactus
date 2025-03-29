@@ -21,6 +21,7 @@ use pyo3::prelude::*;
 use std::collections::HashMap;
 use serde::Serialize;
 use std::process::Child;
+use std::process::Command;
 
 #[derive(Clone)]
 pub struct GPUClientManager {
@@ -95,7 +96,7 @@ impl GPUClientManager {
     }
 
     async fn register(&self) -> Result<()> {
-        let gpu_info = get_gpu_info()?;
+        let gpu_info = get_gpu_memory_info()?;
         let model_manager = self.model_manager.lock().await;
         let mut model_cids = HashMap::new();
         
@@ -104,8 +105,9 @@ impl GPUClientManager {
             model_cids.insert(model_type.clone(), model.model_cid.clone());
         }
 
+        let loaded_models = model_manager.get_loaded_models();
         let capabilities = ClientCapabilities {
-            models: vec!["stable_diffusion".to_string()],
+            models: loaded_models.clone(),
             model_cids,
             gpu_available: gpu_info.is_some(),
         };
@@ -124,7 +126,7 @@ impl GPUClientManager {
                 cuda_version: "N/A".to_string(),
                 compute_capability: "N/A".to_string(),
             }),
-            loaded_models: vec!["stable_diffusion".to_string()],
+            loaded_models,
             last_heartbeat: Utc::now(),
             status: "online".to_string(),
             capabilities,
@@ -171,6 +173,17 @@ impl GPUClientManager {
             model_cids.insert(model_type.clone(), model.model_cid.clone());
         }
 
+        // Get current GPU info
+        let gpu_info = get_gpu_memory_info()?.unwrap_or_else(|| GPUInfo {
+            device_name: "CPU".to_string(),
+            total_memory: 0.0,
+            allocated_memory: 0.0,
+            reserved_memory: 0.0,
+            free_memory: 0.0,
+            cuda_version: "N/A".to_string(),
+            compute_capability: "N/A".to_string(),
+        });
+
         let update = HeartbeatUpdate {
             client_id: self.client_id,
             loaded_models: model_manager.get_loaded_models(),
@@ -180,8 +193,9 @@ impl GPUClientManager {
             capabilities: ClientCapabilities {
                 models: model_manager.get_loaded_models(),
                 model_cids,
-                gpu_available: check_gpu_available(),
+                gpu_available: gpu_info.total_memory > 0.0,
             },
+            gpu_info,
         };
 
         self.session
@@ -676,6 +690,49 @@ fn get_gpu_info() -> Result<Option<GPUInfo>> {
         tracing::info!("Successfully got GPU info for device: {}", device_name);
         Ok(Some(info))
     })
+}
+
+fn get_gpu_memory_info() -> Result<Option<GPUInfo>> {
+    let output = Command::new("nvidia-smi")
+        .args(&["--query-gpu=memory.total,memory.used,memory.free,name", "--format=csv,nounits,noheader"])
+        .output()?;
+    
+    if !output.status.success() {
+        tracing::warn!("Failed to get GPU info from nvidia-smi");
+        return Ok(None);
+    }
+    
+    let output_str = String::from_utf8(output.stdout)?;
+    let lines: Vec<&str> = output_str.trim().split('\n').collect();
+    
+    if lines.is_empty() {
+        tracing::warn!("No GPU found");
+        return Ok(None);
+    }
+    
+    // Get first GPU info
+    let line = lines[0];
+    let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+    
+    if parts.len() != 4 {
+        tracing::warn!("Unexpected nvidia-smi output format");
+        return Ok(None);
+    }
+    
+    let total_memory = parts[0].parse::<f64>()?;
+    let used_memory = parts[1].parse::<f64>()?;
+    let free_memory = parts[2].parse::<f64>()?;
+    let device_name = parts[3].to_string();
+    
+    Ok(Some(GPUInfo {
+        device_name,
+        total_memory,
+        allocated_memory: used_memory,
+        reserved_memory: 0.0,  // nvidia-smi doesn't provide this
+        free_memory,
+        cuda_version: "N/A".to_string(),  // We'll keep this from PyTorch
+        compute_capability: "N/A".to_string(),
+    }))
 }
 
 fn check_gpu_available() -> bool {
