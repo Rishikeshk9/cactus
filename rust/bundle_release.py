@@ -32,34 +32,54 @@ def install_packages():
     print("Upgrading pip...")
     run_command([python_cmd, "-m", "pip", "install", "--upgrade", "pip"])
 
+    # First verify Python environment
+    print("Verifying Python environment...")
+    if not run_command([python_cmd, "-c", "import sys; print(sys.executable)"]):
+        print("ERROR: Python environment is not properly set up")
+        sys.exit(1)
+
+    # Clear pip cache first
+    print("Clearing pip cache...")
+    run_command([python_cmd, "-m", "pip", "cache", "purge"])
+
     # Install PyTorch with CUDA support
     print("Installing PyTorch with CUDA support...")
-    if not run_command([
+    torch_install_result = run_command([
         python_cmd,
         "-m",
         "pip",
         "install",
         "--no-cache-dir",
+        "--verbose",  # Added verbose flag to see more details
         "--extra-index-url",
         "https://download.pytorch.org/whl/cu121",
         "torch",
         "torchvision",
         "torchaudio"
-    ]):
+    ])
+
+    if not torch_install_result:
         print("Failed to install PyTorch with CUDA support")
+        # Print pip debug info
+        run_command([python_cmd, "-m", "pip", "debug"])
         sys.exit(1)
 
-    # Verify CUDA is available
-    try:
-        import torch
-        if not torch.cuda.is_available():
-            print("ERROR: CUDA is not available after PyTorch installation")
-            print("This client requires CUDA support for AI prediction")
-            sys.exit(1)
-        print(f"Successfully installed PyTorch with CUDA support")
-        print(f"CUDA version: {torch.version.cuda}")
-    except Exception as e:
-        print(f"Error verifying CUDA support: {e}")
+    # Verify the installation immediately after
+    print("Verifying PyTorch installation...")
+    verify_cmd = [
+        python_cmd,
+        "-c",
+        "import torch; print(f'PyTorch version: {torch.__version__}'); "
+        "print(f'CUDA available: {torch.cuda.is_available()}'); "
+        "print(f'CUDA version: {torch.version.cuda}')"
+    ]
+    
+    if not run_command(verify_cmd):
+        print("ERROR: PyTorch verification failed")
+        print("Trying to diagnose the issue...")
+        # Try to get more information about the Python environment
+        run_command([python_cmd, "-c", "import sys; print('Python path:', sys.path)"])
+        run_command([python_cmd, "-m", "pip", "list"])
         sys.exit(1)
 
     # Install other packages one by one
