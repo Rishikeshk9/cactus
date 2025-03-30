@@ -16,12 +16,17 @@ use axum::{
     routing::{post, get},
     extract::{State, Json},
     response::IntoResponse,
+    handler::Handler,
+    body::Body,
+    http::Request,
+    response::Response,
 };
 use pyo3::prelude::*;
 use std::collections::HashMap;
 use serde::Serialize;
 use std::process::Child;
 use std::process::Command;
+use std::error::Error as StdError;
 
 #[derive(Clone)]
 pub struct GPUClientManager {
@@ -35,6 +40,7 @@ pub struct GPUClientManager {
     model_manager: Arc<Mutex<ModelManager>>,
     ngrok_process: Arc<Mutex<Option<Child>>>,
     ngrok_url: Arc<Mutex<Option<String>>>,
+    status: Arc<Mutex<String>>,
 }
 
 impl GPUClientManager {
@@ -54,12 +60,14 @@ impl GPUClientManager {
             model_manager: Arc::new(Mutex::new(ModelManager::new())),
             ngrok_process: Arc::new(Mutex::new(None)),
             ngrok_url: Arc::new(Mutex::new(Some(format!("{}:{}", ip_addr, port)))),
+            status: Arc::new(Mutex::new("online".to_string())),
         })
     }
 
     pub async fn start(&mut self) -> Result<()> {
         self.running.store(true, Ordering::SeqCst);
         
+        // Register with the server
         self.register().await?;
         
         // Start the prediction server
@@ -81,15 +89,62 @@ impl GPUClientManager {
                     loaded_models: Vec::new(),
                 })
             }))
-            .with_state(manager);
+            .with_state(manager.clone());
             
         let addr = (Ipv4Addr::new(0, 0, 0, 0), self.port);
         tracing::info!("Starting prediction server on {}:{}", addr.0, addr.1);
         
-        // Start both the heartbeat loop and the prediction server
-        tokio::select! {
-            _ = self.heartbeat_loop() => {}
-            _ = axum::serve(tokio::net::TcpListener::bind(addr).await?, app) => {}
+        // Start heartbeat loop in a completely separate high-priority task
+        // This uses a dedicated thread with its own tokio runtime to ensure
+        // it's not blocked by other operations
+        let heartbeat_manager = manager.clone();
+        let running = self.running.clone();
+        
+        // Spawn the heartbeat task in a completely separate thread
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+                
+            rt.block_on(async move {
+                tracing::info!("Starting heartbeat loop in dedicated thread");
+                while running.load(Ordering::SeqCst) {
+                    // Send heartbeat with comprehensive error handling
+                    match heartbeat_manager.send_heartbeat().await {
+                        Ok(_) => {
+                            tracing::debug!("Heartbeat sent successfully at {}", Utc::now());
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to send heartbeat: {}", e);
+                        }
+                    }
+                    
+                    // Sleep for exactly 1 second regardless of how long the heartbeat takes
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                tracing::info!("Heartbeat loop stopped");
+            });
+        });
+
+        // Start the server in the main task
+        let server_handle = tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(listener) => {
+                    if let Err(e) = axum::serve(listener, app).await {
+                        tracing::error!("Server error: {}", e);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to bind server: {}", e);
+                }
+            }
+        });
+
+        // Wait for the server task to complete
+        match server_handle.await {
+            Ok(_) => tracing::info!("Server task completed"),
+            Err(e) => tracing::error!("Server task failed: {}", e),
         }
         
         Ok(())
@@ -157,52 +212,162 @@ impl GPUClientManager {
     }
 
     async fn heartbeat_loop(&self) -> Result<()> {
+        tracing::info!("Starting heartbeat loop");
         while self.running.load(Ordering::SeqCst) {
-            self.send_heartbeat().await?;
+            match self.send_heartbeat().await {
+                Ok(_) => {
+                    tracing::debug!("Heartbeat sent successfully");
+                }
+                Err(e) => {
+                    tracing::error!("Failed to send heartbeat: {}", e);
+                    // Don't break the loop on error, just continue after a short delay
+                    time::sleep(Duration::from_secs(1)).await;
+                }
+            }
             time::sleep(Duration::from_secs(1)).await;
         }
+        tracing::info!("Heartbeat loop stopped");
         Ok(())
     }
 
     async fn send_heartbeat(&self) -> Result<()> {
-        let model_manager = self.model_manager.lock().await;
-        let mut model_cids = HashMap::new();
+        let start_time = std::time::Instant::now();
         
-        // Get loaded models and their CIDs
-        for (model_type, model) in &model_manager.loaded_models {
-            model_cids.insert(model_type.clone(), model.model_cid.clone());
+        // Get current GPU info first, as it's independent and doesn't require locks
+        let gpu_info = match get_gpu_memory_info() {
+            Ok(Some(info)) => info,
+            Ok(None) => GPUInfo {
+                device_name: "CPU".to_string(),
+                total_memory: 0.0,
+                allocated_memory: 0.0,
+                reserved_memory: 0.0,
+                free_memory: 0.0,
+                cuda_version: "N/A".to_string(),
+                compute_capability: "N/A".to_string(),
+            },
+            Err(e) => {
+                tracing::warn!("Failed to get GPU info: {}, using default values", e);
+                GPUInfo {
+                    device_name: "CPU".to_string(),
+                    total_memory: 0.0,
+                    allocated_memory: 0.0,
+                    reserved_memory: 0.0,
+                    free_memory: 0.0,
+                    cuda_version: "N/A".to_string(),
+                    compute_capability: "N/A".to_string(),
+                }
+            }
+        };
+
+        // Initialize with default values
+        let mut loaded_models = Vec::new();
+        let mut model_cids = HashMap::new();
+        let mut current_status = "online".to_string();
+        
+        // Try to acquire locks with a timeout to prevent deadlocks
+        // Try to get the model manager lock with a short timeout
+        let model_manager_lock_result = tokio::time::timeout(
+            Duration::from_millis(100), 
+            self.model_manager.lock()
+        ).await;
+        
+        if let Ok(model_manager) = model_manager_lock_result {
+            // We have the model manager lock, get the data we need
+            loaded_models = model_manager.get_loaded_models();
+            model_cids = model_manager.loaded_models.iter()
+                .map(|(model_type, model)| (model_type.clone(), model.model_cid.clone()))
+                .collect();
+                
+            // Drop the model manager lock immediately
+            drop(model_manager);
+        } else {
+            tracing::warn!("Timeout waiting for model_manager lock during heartbeat, using empty values");
+        }
+            
+        // Try to get the status lock
+        let status_lock_result = tokio::time::timeout(
+            Duration::from_millis(100),
+            self.status.lock()
+        ).await;
+        
+        if let Ok(status) = status_lock_result {
+            current_status = status.clone();
+            // Drop the status lock immediately
+            drop(status);
+        } else {
+            tracing::warn!("Timeout waiting for status lock during heartbeat, using default status");
         }
 
-        // Get current GPU info
-        let gpu_info = get_gpu_memory_info()?.unwrap_or_else(|| GPUInfo {
-            device_name: "CPU".to_string(),
-            total_memory: 0.0,
-            allocated_memory: 0.0,
-            reserved_memory: 0.0,
-            free_memory: 0.0,
-            cuda_version: "N/A".to_string(),
-            compute_capability: "N/A".to_string(),
-        });
-
+        // Create the heartbeat update
         let update = HeartbeatUpdate {
             client_id: self.client_id,
-            loaded_models: model_manager.get_loaded_models(),
-            status: "online".to_string(),
+            loaded_models: loaded_models.clone(),
+            status: current_status,
             last_heartbeat: Utc::now(),
             ip_address: Some(format!("{}:{}", self.ip_addr, self.port)),
             capabilities: ClientCapabilities {
-                models: model_manager.get_loaded_models(),
+                models: loaded_models,
                 model_cids,
                 gpu_available: gpu_info.total_memory > 0.0,
             },
             gpu_info,
         };
 
-        self.session
-            .post(&format!("{}/heartbeat/{}", self.server_url, self.client_id))
-            .json(&update)
-            .send()
-            .await?;
+        // Send heartbeat to server with timeout and better error handling
+        let send_result = tokio::time::timeout(
+            Duration::from_secs(3), // Timeout after 3 seconds
+            self.session.post(&format!("{}/heartbeat/{}", self.server_url, self.client_id))
+                .json(&update)
+                .send()
+        ).await;
+        
+        let response = match send_result {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
+                return Err(anyhow::anyhow!("Failed to send heartbeat: {}", e));
+            },
+            Err(_) => {
+                return Err(anyhow::anyhow!("Heartbeat request timed out after 3 seconds"));
+            }
+        };
+
+        // Check response status
+        if !response.status().is_success() {
+            let status = response.status();
+            
+            // Use timeout for reading the response text as well
+            let text_result = tokio::time::timeout(
+                Duration::from_secs(1),
+                response.text()
+            ).await;
+            
+            let error_text = match text_result {
+                Ok(Ok(text)) => text,
+                Ok(Err(e)) => format!("Failed to read error response: {}", e),
+                Err(_) => "Timed out reading error response".to_string(),
+            };
+            
+            tracing::error!(
+                "Server rejected heartbeat with status {}: {}",
+                status,
+                error_text
+            );
+            
+            return Err(anyhow::anyhow!(
+                "Server rejected heartbeat with status {}: {}",
+                status,
+                error_text
+            ));
+        }
+
+        let elapsed = start_time.elapsed();
+        tracing::debug!(
+            "Heartbeat sent successfully for client {} at {}:{} (took {:?})",
+            self.client_id,
+            self.ip_addr,
+            self.port,
+            elapsed
+        );
 
         Ok(())
     }
@@ -235,38 +400,59 @@ impl GPUClientManager {
         Ok("base64_encoded_image".to_string())
     }
 
-    pub async fn handle_prediction_request(&self, request: PredictionRequest) -> Result<PredictionResponse, Box<dyn std::error::Error>> {
-        // Lock the mutex to get access to model_manager
-        let mut model_manager = self.model_manager.lock().await;
-        
+    pub async fn handle_prediction_request(&self, request: PredictionRequest) -> Result<PredictionResponse, Box<dyn StdError + Send + Sync>> {
+        // Set status to busy with a short-lived lock
+        {
+            let mut status = self.status.lock().await;
+            *status = "busy".to_string();
+        }
+
         // Initialize if not already initialized
-        if !model_manager.is_initialized() {
-            tracing::info!("Initializing Python module...");
-            if let Err(e) = model_manager.initialize().await {
-                tracing::error!("Failed to initialize Python module: {}", e);
-                return Ok(PredictionResponse {
-                    success: false,
-                    prompt: None,
-                    generation_time_ms: None,
-                    parameters: None,
-                    timestamp: None,
-                    image_base64: None,
-                    error: Some(format!("Failed to initialize Python module: {}", e)),
-                });
+        {
+            let mut model_manager = self.model_manager.lock().await;
+            if !model_manager.is_initialized() {
+                tracing::info!("Initializing Python module...");
+                if let Err(e) = model_manager.initialize().await {
+                    tracing::error!("Failed to initialize Python module: {}", e);
+                    // Set status back to online
+                    {
+                        let mut status = self.status.lock().await;
+                        *status = "online".to_string();
+                    }
+                    return Ok(PredictionResponse {
+                        success: false,
+                        prompt: None,
+                        generation_time_ms: None,
+                        parameters: None,
+                        timestamp: None,
+                        image_base64: None,
+                        error: Some(format!("Failed to initialize Python module: {}", e)),
+                    });
+                }
             }
         }
 
-        match request.model_type {
+        let result = match request.model_type {
             ModelType::CovidXRay => {
                 if let Some(image_url) = request.image_url {
                     // Handle COVID X-Ray prediction
                     tracing::info!("Loading COVID X-Ray model...");
-                    match model_manager.load_covid_model(&request.model_cid).await {
+                    let model_load_result = {
+                        let mut model_manager = self.model_manager.lock().await;
+                        model_manager.load_covid_model(&request.model_cid).await
+                    };
+
+                    match model_load_result {
                         Ok(_) => {
                             tracing::info!("COVID X-Ray model loaded successfully");
                             
                             // Get device info from Python
-                            let device_info = match model_manager.get_device_info().await {
+                            let device_info = {
+                                let model_manager = self.model_manager.lock().await;
+                                model_manager.get_device_info().await
+                            };
+
+                            let device_info = match device_info {
                                 Ok(info) => info,
                                 Err(e) => {
                                     tracing::error!("Failed to get device info: {}", e);
@@ -289,7 +475,12 @@ impl GPUClientManager {
                             );
                             
                             // Process the X-ray image
-                            match model_manager.process_xray(&image_url).await {
+                            let process_result = {
+                                let model_manager = self.model_manager.lock().await;
+                                model_manager.process_xray(&image_url).await
+                            };
+
+                            match process_result {
                                 Ok(result) => {
                                     // Convert probabilities to parameters format
                                     let mut parameters = HashMap::new();
@@ -360,7 +551,12 @@ impl GPUClientManager {
 
                     // Get or load the model
                     tracing::info!("Loading Stable Diffusion model...");
-                    let _model = match model_manager.get_model(&request.model_cid).await {
+                    let model_load_result = {
+                        let mut model_manager = self.model_manager.lock().await;
+                        model_manager.get_model(&request.model_cid).await
+                    };
+
+                    let _model = match model_load_result {
                         Ok(model) => model,
                         Err(e) => {
                             tracing::error!("Failed to load Stable Diffusion model: {}", e);
@@ -378,11 +574,16 @@ impl GPUClientManager {
                     
                     // Generate the image
                     tracing::info!("Generating image...");
-                    let result = match model_manager.generate_image(
-                        &prompt,
-                        inference_steps,
-                        guidance_scale,
-                    ).await {
+                    let generate_result = {
+                        let model_manager = self.model_manager.lock().await;
+                        model_manager.generate_image(
+                            &prompt,
+                            inference_steps,
+                            guidance_scale,
+                        ).await
+                    };
+
+                    let result = match generate_result {
                         Ok(result) => result,
                         Err(e) => {
                             tracing::error!("Failed to generate image: {}", e);
@@ -419,7 +620,15 @@ impl GPUClientManager {
                     })
                 }
             }
+        };
+
+        // Set status back to online with a short-lived lock
+        {
+            let mut status = self.status.lock().await;
+            *status = "online".to_string();
         }
+
+        result
     }
 
     async fn start_prediction_server(&self) -> Result<()> {
@@ -461,21 +670,22 @@ impl GPUClientManager {
     }
 }
 
-// Move predict function outside impl block
+// Move predict function outside impl block and add proper trait bounds
+#[axum::debug_handler]
 async fn predict(
     State(manager): State<Arc<GPUClientManager>>,
     Json(request): Json<PredictionRequest>,
-) -> impl IntoResponse {
+) -> Response {
     match manager.handle_prediction_request(request).await {
         Ok(response) => {
             tracing::info!("Received prediction response from client {}", manager.client_id);
-            Json(response)
+            Json(response).into_response()
         }
-        Err(_e) => {
+        Err(e) => {
             tracing::error!(
                 "Error getting prediction from client {}: {}",
                 manager.client_id,
-                _e
+                e
             );
             Json(PredictionResponse {
                 success: false,
@@ -484,8 +694,8 @@ async fn predict(
                 parameters: None,
                 timestamp: None,
                 image_base64: None,
-                error: Some(_e.to_string()),
-            })
+                error: Some(e.to_string()),
+            }).into_response()
         }
     }
 }

@@ -30,7 +30,7 @@ enum Commands {
     /// Run the client
     Client {
         /// Server URL
-        #[arg(short, long, default_value = "http://127.0.0.1:8001")]
+        #[arg(short, long, default_value = "http://3.110.255.211:8001")]
         server_url: String,
         /// Port to bind to
         #[arg(short, long, default_value = "8002")]
