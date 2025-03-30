@@ -400,12 +400,13 @@ impl GPUClientManager {
         Ok("base64_encoded_image".to_string())
     }
 
-    pub async fn handle_prediction_request(&self, request: PredictionRequest) -> Result<PredictionResponse, Box<dyn StdError + Send + Sync>> {
-        // Set status to busy with a short-lived lock
-        {
-            let mut status = self.status.lock().await;
-            *status = "busy".to_string();
-        }
+    pub fn handle_prediction_request(&self, request: PredictionRequest) -> Result<PredictionResponse, Box<dyn StdError + Send + Sync>> {
+        // Set Python environment variables before handling the request
+        std::env::set_var("PYTHONHOME", self.get_python_home()?);
+        std::env::set_var("PYTHONPATH", self.get_python_path()?);
+
+        // Update status to busy
+        self.status.lock().await.store("busy".to_string(), Ordering::SeqCst);
 
         // Initialize if not already initialized
         {
@@ -667,6 +668,22 @@ impl GPUClientManager {
         axum::serve(listener, app).await?;
 
         Ok(())
+    }
+
+    fn get_python_home(&self) -> Result<String, Box<dyn StdError>> {
+        let exe_dir = std::env::current_exe()?
+            .parent()
+            .ok_or_else(|| Error::msg("Failed to get executable directory"))?
+            .to_path_buf();
+        Ok(exe_dir.join("python").to_string_lossy().to_string())
+    }
+
+    fn get_python_path(&self) -> Result<String, Box<dyn StdError>> {
+        let exe_dir = std::env::current_exe()?
+            .parent()
+            .ok_or_else(|| Error::msg("Failed to get executable directory"))?
+            .to_path_buf();
+        Ok(exe_dir.join("python").join("site-packages").to_string_lossy().to_string())
     }
 }
 
