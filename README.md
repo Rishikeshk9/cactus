@@ -187,6 +187,11 @@ The `cactus_payment.move` contract implements:
 
 This project is licensed under the MIT License - see the LICENSE file for details. 
 
+
+Before Running the client following is important 
+Python
+Rust
+
 SERVER_URL - the Gateway URL default:http://3.110.255.211:8001 if not mentioned.
 NODE_IP - this is where you'll receive new Jobs make sure it is static
 NODE_PORT - port over which the client will run on your node
