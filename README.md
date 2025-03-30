@@ -188,14 +188,12 @@ The `cactus_payment.move` contract implements:
 This project is licensed under the MIT License - see the LICENSE file for details. 
 
 SERVER_URL - the Gateway URL default:http://3.110.255.211:8001 if not mentioned.
-
 NODE_IP - this is where you'll receive new Jobs make sure it is static
 NODE_PORT - port over which the client will run on your node
 
-
-cargo run -- client --server-url SERVER_URL --public-ip NODE_IP --port NODE_PORT
+cactus.exe client --server-url SERVER_URL --public-ip NODE_IP --port NODE_PORT
 
 If you are running the client on a Local PC & want to tunnel your NODE_PORT to an EC2's port
 
 ssh -i <.pemkey> -4 -R 0.0.0.0:<EC2_PORT>:127.0.0.1:<NODE_PORT> ec2-user@<EC2_PUBLIC_IP>
-
+ssh -v -i cactus.pem -4 -R 0.0.0.0:8002:127.0.0.1:8002 ec2-user@3.110.255.211
