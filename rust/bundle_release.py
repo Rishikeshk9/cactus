@@ -140,12 +140,11 @@ def install_packages():
             "pip",
             "install",
             "--no-cache-dir",
-            "--verbose",
-            "--extra-index-url",
-            "https://download.pytorch.org/whl/cu121",
-            "torch",
-            "torchvision",
-            "torchaudio"
+            "--index-url",
+            "https://download.pytorch.org/whl/cu118",
+            "torch==2.2.1",
+            "torchvision==0.17.1",
+            "torchaudio==2.2.1"
         ])
 
         if not torch_install_result:
@@ -161,7 +160,7 @@ def install_packages():
         print("Please ensure:")
         print("1. You have an NVIDIA GPU")
         print("2. NVIDIA drivers are up to date")
-        print("3. CUDA 12.1 or later is installed")
+        print("3. CUDA 11.8 or later is installed")
         sys.exit(1)
     
     print("✓ CUDA support verified")
