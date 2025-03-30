@@ -32,55 +32,35 @@ def install_packages():
     print("Upgrading pip...")
     run_command([python_cmd, "-m", "pip", "install", "--upgrade", "pip"])
 
-    # Try to detect CUDA availability
-    cuda_available = False
-    try:
-        # First try to install torch CPU to check CUDA
-        print("Installing PyTorch (CPU) to check CUDA...")
-        if run_command([
-            python_cmd, 
-            "-m", 
-            "pip", 
-            "install", 
-            "--no-cache-dir",
-            "torch",  # Latest stable version
-            "torchvision",
-            "torchaudio"
-        ]):
-            import torch
-            cuda_available = torch.cuda.is_available()
-    except:
-        pass
+    # Install PyTorch with CUDA support
+    print("Installing PyTorch with CUDA support...")
+    if not run_command([
+        python_cmd,
+        "-m",
+        "pip",
+        "install",
+        "--no-cache-dir",
+        "--extra-index-url",
+        "https://download.pytorch.org/whl/cu121",
+        "torch",
+        "torchvision",
+        "torchaudio"
+    ]):
+        print("Failed to install PyTorch with CUDA support")
+        sys.exit(1)
 
-    print(f"CUDA detected: {cuda_available}")
-    
-    # If CUDA is available, reinstall PyTorch with CUDA support
-    if cuda_available:
-        print("Reinstalling PyTorch with CUDA support...")
-        run_command([
-            python_cmd,
-            "-m",
-            "pip",
-            "uninstall",
-            "-y",
-            "torch",
-            "torchvision",
-            "torchaudio"
-        ])
-        if not run_command([
-            python_cmd,
-            "-m",
-            "pip",
-            "install",
-            "--no-cache-dir",
-            "--extra-index-url",
-            "https://download.pytorch.org/whl/cu121",
-            "torch",  # Latest stable version with CUDA
-            "torchvision",
-            "torchaudio"
-        ]):
-            print("Failed to install PyTorch with CUDA support, falling back to CPU version...")
-            cuda_available = False
+    # Verify CUDA is available
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            print("ERROR: CUDA is not available after PyTorch installation")
+            print("This client requires CUDA support for AI prediction")
+            sys.exit(1)
+        print(f"Successfully installed PyTorch with CUDA support")
+        print(f"CUDA version: {torch.version.cuda}")
+    except Exception as e:
+        print(f"Error verifying CUDA support: {e}")
+        sys.exit(1)
 
     # Install other packages one by one
     other_packages = [
