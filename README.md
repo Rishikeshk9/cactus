@@ -2,6 +2,70 @@
 
 Cactus is a decentralized AI inference protocol that enables efficient and secure execution of AI tasks through a network of specialized nodes (orchestrators) and routing servers. The protocol ensures fair compensation, quality verification, and reliable task execution.
 
+
+## 🚀 Before Running the Client
+
+Make sure the following dependencies are installed:
+
+---
+
+### 🐍 Python 3.13.2  
+🔗 [Download Python 3.13.2](https://www.python.org/downloads/release/python-3132/)
+
+---
+
+### 🦀 Rust  
+🔗 [Install Rust](https://www.rust-lang.org/tools/install)
+
+---
+
+### ⚙️ Install CUDA-enabled PyTorch
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+```
+
+---
+
+### 📦 Install Python Requirements
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## ▶️ Running the Client
+
+```bash
+cactus.exe client --server-url SERVER_URL --public-ip NODE_IP --port NODE_PORT
+```
+
+### 🧠 Parameters:
+
+- `SERVER_URL` – The Gateway URL.  
+  **Default:** `http://3.110.255.211:8001` (if not provided)
+- `NODE_IP` – The IP address of your client machine.  
+  This should be **static** so jobs can reach you.
+- `NODE_PORT` – The port on which the client will run on your node.
+
+---
+
+## 🌐 Running on Local Machine with EC2 Tunneling
+
+If you’re running the client on a **local PC** and want to expose your `NODE_PORT` to an EC2 instance, use SSH port forwarding:
+
+```bash
+ssh -i <your_key.pem> -4 -R 0.0.0.0:<EC2_PORT>:127.0.0.1:<NODE_PORT> ec2-user@<EC2_PUBLIC_IP>
+```
+
+### ✅ Example:
+
+```bash
+ssh -v -i cactus.pem -4 -R 0.0.0.0:8002:127.0.0.1:8002 ec2-user@3.110.255.211
+```
+
+
 ## Architecture Overview
 
 ### Core Components
@@ -187,18 +251,3 @@ The `cactus_payment.move` contract implements:
 
 This project is licensed under the MIT License - see the LICENSE file for details. 
 
-
-Before Running the client following is important 
-Python
-Rust
-
-SERVER_URL - the Gateway URL default:http://3.110.255.211:8001 if not mentioned.
-NODE_IP - this is where you'll receive new Jobs make sure it is static
-NODE_PORT - port over which the client will run on your node
-
-cactus.exe client --server-url SERVER_URL --public-ip NODE_IP --port NODE_PORT
-
-If you are running the client on a Local PC & want to tunnel your NODE_PORT to an EC2's port
-
-ssh -i <.pemkey> -4 -R 0.0.0.0:<EC2_PORT>:127.0.0.1:<NODE_PORT> ec2-user@<EC2_PUBLIC_IP>
-ssh -v -i cactus.pem -4 -R 0.0.0.0:8002:127.0.0.1:8002 ec2-user@3.110.255.211
