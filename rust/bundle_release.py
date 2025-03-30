@@ -142,9 +142,9 @@ def install_packages():
             "--no-cache-dir",
             "--index-url",
             "https://download.pytorch.org/whl/cu124",
-            "torch==2.2.1",
-            "torchvision==0.17.1",
-            "torchaudio==2.2.1"
+            "torch",
+            "torchvision",
+            "torchaudio"
         ])
 
         if not torch_install_result:
