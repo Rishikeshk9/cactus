@@ -16,9 +16,6 @@ use axum::{
     routing::{post, get},
     extract::{State, Json},
     response::IntoResponse,
-    handler::Handler,
-    body::Body,
-    http::Request,
     response::Response,
 };
 use pyo3::prelude::*;
@@ -401,11 +398,14 @@ impl GPUClientManager {
     }
 
     pub async fn handle_prediction_request(&self, request: PredictionRequest) -> Result<PredictionResponse, Box<dyn StdError + Send + Sync>> {
-        // Set status to busy with a short-lived lock
-        {
-            let mut status = self.status.lock().await;
-            *status = "busy".to_string();
-        }
+        // Set Python environment variables before handling the request
+        std::env::set_var("PYTHONHOME", self.get_python_home()?);
+        std::env::set_var("PYTHONPATH", self.get_python_path()?);
+
+        // Update status to busy
+        let mut status = self.status.lock().await;
+        *status = "busy".to_string();
+        drop(status);
 
         // Initialize if not already initialized
         {
@@ -668,6 +668,22 @@ impl GPUClientManager {
 
         Ok(())
     }
+
+    fn get_python_home(&self) -> Result<String, Box<dyn StdError + Send + Sync>> {
+        let exe_dir = std::env::current_exe()?
+            .parent()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Failed to get executable directory"))?
+            .to_path_buf();
+        Ok(exe_dir.join("python").to_string_lossy().to_string())
+    }
+
+    fn get_python_path(&self) -> Result<String, Box<dyn StdError + Send + Sync>> {
+        let exe_dir = std::env::current_exe()?
+            .parent()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Failed to get executable directory"))?
+            .to_path_buf();
+        Ok(exe_dir.join("python").join("site-packages").to_string_lossy().to_string())
+    }
 }
 
 // Move predict function outside impl block and add proper trait bounds
@@ -679,7 +695,7 @@ async fn predict(
     match manager.handle_prediction_request(request).await {
         Ok(response) => {
             tracing::info!("Received prediction response from client {}", manager.client_id);
-            Json(response).into_response()
+            Json::<PredictionResponse>(response).into_response()
         }
         Err(e) => {
             tracing::error!(
@@ -687,7 +703,7 @@ async fn predict(
                 manager.client_id,
                 e
             );
-            Json(PredictionResponse {
+            Json::<PredictionResponse>(PredictionResponse {
                 success: false,
                 prompt: None,
                 generation_time_ms: None,
@@ -721,7 +737,7 @@ fn get_gpu_info() -> Result<Option<GPUInfo>> {
         // Import torch module with better error handling
         let torch = match py.import("torch") {
             Ok(module) => module,
-            Err(e) => {
+            Err(_e) => {
                 tracing::warn!("PyTorch is not installed. Please install it using: pip install torch");
                 return Ok(Some(GPUInfo {
                     device_name: "CPU".to_string(),
