@@ -66,6 +66,12 @@ impl ClientRegistry {
         let mut available_clients: Vec<_> = clients
             .values()
             .filter(|client| {
+                // First check if client is online
+                if client.status != "online" {
+                    tracing::warn!("Client {} is not online (status: {})", client.client_id, client.status);
+                    return false;
+                }
+
                 // Check if client has GPU
                 if client.gpu_info.total_memory == 0.0 {
                     tracing::warn!("Client {} has no GPU memory", client.client_id);
@@ -95,28 +101,41 @@ impl ClientRegistry {
                 }
 
                 tracing::info!(
-                    "Client {} can load model {} (GPU: {}GB VRAM)",
+                    "Client {} can load model {} (GPU: {}GB VRAM, Status: {})",
                     client.client_id,
                     model_name,
-                    client.gpu_info.total_memory
+                    client.gpu_info.total_memory,
+                    client.status
                 );
                 true
             })
             .cloned()
             .collect();
 
-        // Sort by GPU memory (highest first)
+        // Sort by GPU memory (highest first) and free memory (highest first)
         available_clients.sort_by(|a, b| {
-            b.gpu_info.total_memory.partial_cmp(&a.gpu_info.total_memory).unwrap_or(std::cmp::Ordering::Equal)
+            // First compare by total GPU memory
+            let memory_cmp = b.gpu_info.total_memory.partial_cmp(&a.gpu_info.total_memory)
+                .unwrap_or(std::cmp::Ordering::Equal);
+            
+            if memory_cmp != std::cmp::Ordering::Equal {
+                memory_cmp
+            } else {
+                // If total memory is equal, compare by free memory
+                b.gpu_info.free_memory.partial_cmp(&a.gpu_info.free_memory)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }
         });
 
         // Take the best client and load the model if needed
         if let Some(mut client) = available_clients.first().cloned() {
             if !client.loaded_models.contains(&model_name.to_string()) {
                 tracing::info!(
-                    "Loading model {} on client {}",
+                    "Loading model {} on client {} (GPU: {}GB VRAM, Free: {}GB)",
                     model_name,
-                    client.client_id
+                    client.client_id,
+                    client.gpu_info.total_memory,
+                    client.gpu_info.free_memory
                 );
                 // Add model to loaded models
                 client.loaded_models.push(model_name.to_string());
@@ -127,7 +146,7 @@ impl ClientRegistry {
             }
             Some(client)
         } else {
-            tracing::warn!("No suitable clients found for model {}", model_name);
+            tracing::warn!("No suitable online GPU clients found for model {}", model_name);
             None
         }
     }
