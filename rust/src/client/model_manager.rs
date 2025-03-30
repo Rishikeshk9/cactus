@@ -58,6 +58,34 @@ impl ModelManager {
         Python::with_gil(|py| {
             tracing::info!("Loading Python GPU module...");
             
+            // Set PYTHONHOME and PYTHONPATH to use bundled Python
+            let exe_dir = std::env::current_exe()?
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("Failed to get executable directory"))?
+                .to_path_buf();
+            
+            let python_home = exe_dir.join("python");
+            let site_packages = python_home.join("site-packages");
+            
+            // Set Python environment variables
+            std::env::set_var("PYTHONHOME", &python_home);
+            std::env::set_var("PYTHONPATH", &site_packages);
+            
+            // Add DLL directory to PATH on Windows
+            #[cfg(target_os = "windows")]
+            {
+                let dll_path = python_home.to_string_lossy().to_string();
+                tracing::info!("Adding Python DLL path to PATH: {}", dll_path);
+                std::env::set_var(
+                    "PATH",
+                    format!(
+                        "{};{}",
+                        dll_path,
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                );
+            }
+            
             // First check if CUDA is available in Python
             let torch = match py.import("torch") {
                 Ok(t) => t,
@@ -119,36 +147,14 @@ impl ModelManager {
                 tracing::info!("CUDA version: {}", cuda_version);
             }
             
-            // Load the Python file
-            tracing::info!("Loading Python module from file...");
-            
-            // // Add the protocol directory to Python's path (parent of current dir)
-            // let protocol_dir = std::env::current_dir()?.parent().unwrap().to_path_buf();
-            // let protocol_dir_str = protocol_dir.to_str().unwrap().replace('\\', "/");
-            
-            // // Create a simpler Python path setup
-            // let setup_code = format!(
-            //     "import sys; sys.path.insert(0, r'{}')",
-            //     protocol_dir_str
-            // );
-            
-            // tracing::info!("Adding Python path: {}", setup_code);
-            
-            // if let Err(e) = py.eval(&setup_code, None, None) {
-            //     tracing::error!("Failed to add protocol directory to Python path: {}", e);
-            //     return Err(anyhow::anyhow!("Failed to add protocol directory to Python path: {}", e));
-            // }
-            
-            // // Verify the path was added
-            // let verify_code = "print(sys.path[0])";
-            // if let Err(e) = py.eval(verify_code, None, None) {
-            //     tracing::error!("Failed to verify Python path: {}", e);
-            //     return Err(anyhow::anyhow!("Failed to verify Python path: {}", e));
-            // }
+            // Load the Python file from the bundled location
+            let gpu_load_path = exe_dir.join("models_config").join("gpu_loadrust.py");
+            let gpu_load_content = std::fs::read_to_string(&gpu_load_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read gpu_loadrust.py: {}", e))?;
             
             let gpu_load = match PyModule::from_code(
                 py,
-                include_str!("../../../gpu_loadrust.py"),
+                &gpu_load_content,
                 "gpu_loadrust.py",
                 "gpu_loadrust",
             ) {
