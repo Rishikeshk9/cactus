@@ -51,7 +51,7 @@ class PredictionRequest(BaseModel):
 class ClientRegistry:
     def __init__(self):
         self.clients: Dict[str, GPUClient] = {}
-        self.heartbeat_timeout = 30  # seconds
+        self.heartbeat_timeout = 3  # seconds
         self._lock = asyncio.Lock()  # Lock for client registration/updates
         self._search_lock = asyncio.Lock()  # Separate lock for client search
         self._cleanup_lock = asyncio.Lock()  # Lock for cleanup operations

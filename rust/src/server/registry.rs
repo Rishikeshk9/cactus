@@ -22,7 +22,7 @@ impl ClientRegistry {
     pub fn new() -> Self {
         Self {
             clients: RwLock::new(HashMap::new()),
-            heartbeat_timeout: Duration::from_secs(30),
+            heartbeat_timeout: Duration::from_secs(3),
         }
     }
 

@@ -12,7 +12,7 @@ compiled_package_info:
     std: "0000000000000000000000000000000000000000000000000000000000000001"
     vm: "0000000000000000000000000000000000000000000000000000000000000000"
     vm_reserved: "0000000000000000000000000000000000000000000000000000000000000000"
-  source_digest: BFD9CCB946F558592C80FEBAF30B0D35D230D46521CE31DBD573BB3687B36D19
+  source_digest: 3AA34F45E2785E058229F5FEDF129CDDFF0B12C145D83DAC020E9BD770A14613
   build_flags:
     dev_mode: true
     test_mode: true
@@ -20,12 +20,12 @@ compiled_package_info:
     generate_docs: false
     generate_abis: false
     generate_move_model: true
-    full_model_generation: false
+    full_model_generation: true
     install_dir: ~
     force_recompilation: false
     additional_named_addresses: {}
     fetch_deps_only: false
-    skip_fetch_latest_git_deps: false
+    skip_fetch_latest_git_deps: true
     compiler_config:
       bytecode_version: 7
       known_attributes:

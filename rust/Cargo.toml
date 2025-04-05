@@ -2,6 +2,7 @@
 name = "cactus"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 tokio = { version = "1.36", features = ["full"] }
@@ -19,10 +20,22 @@ thiserror = "1.0"
 tower-http = { version = "0.5", features = ["cors"] }
 clap = { version = "4.5", features = ["derive"] }
 base64 = "0.21"
-image = "0.24"
+image = { version = "0.24", features = ["ico"] }
 paris = "1.5"
 pyo3 = { version = "0.19", features = ["auto-initialize"] }
+# Desktop application dependencies
+egui = "0.22.0"
+eframe = "0.22.0"
+dirs = "5.0.1"
+winapi = { version = "0.3", features = ["winuser"] }
+
+[build-dependencies]
+embed-resource = "1.8"
 
 [[bin]]
 name = "cactus"
-path = "src/main.rs" 
+path = "src/main.rs"
+
+[[bin]]
+name = "cactus-desktop"
+path = "src/desktop_client.rs" 
