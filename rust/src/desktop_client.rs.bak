@@ -1,0 +1,243 @@
+use eframe::egui;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Child, Command};
+
+// Configuration structure that can be saved/loaded
+#[derive(Serialize, Deserialize, Clone)]
+struct ClientConfig {
+    server_url: String,
+    public_ip: String,
+    port: String,
+    // Add any other configuration parameters here
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            server_url: "http://3.110.255.211:8001".to_string(),
+            public_ip: "".to_string(),
+            port: "8002".to_string(),
+        }
+    }
+}
+
+struct CactusClientApp {
+    config: ClientConfig,
+    config_path: PathBuf,
+    client_process: Option<Child>,
+    status_text: String,
+    log_text: String,
+}
+
+impl CactusClientApp {
+    fn new() -> Self {
+        // Create config directory if it doesn't exist
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("cactus-client");
+        
+        fs::create_dir_all(&config_dir).ok();
+        
+        let config_path = config_dir.join("config.json");
+        
+        // Load config if it exists
+        let config = if config_path.exists() {
+            match fs::read_to_string(&config_path) {
+                Ok(json) => match serde_json::from_str(&json) {
+                    Ok(cfg) => cfg,
+                    Err(_) => ClientConfig::default(),
+                },
+                Err(_) => ClientConfig::default(),
+            }
+        } else {
+            ClientConfig::default()
+        };
+        
+        Self {
+            config,
+            config_path,
+            client_process: None,
+            status_text: "Ready".to_string(),
+            log_text: "Welcome to Cactus Protocol Client\n".to_string(),
+        }
+    }
+    
+    fn save_config(&self) -> Result<(), String> {
+        match serde_json::to_string_pretty(&self.config) {
+            Ok(json) => match fs::write(&self.config_path, json) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(format!("Failed to write config: {}", e)),
+            },
+            Err(e) => Err(format!("Failed to serialize config: {}", e)),
+        }
+    }
+    
+    fn start_client(&mut self) -> Result<(), String> {
+        if self.client_process.is_some() {
+            return Err("Client is already running".to_string());
+        }
+        
+        if self.config.public_ip.trim().is_empty() {
+            return Err("Public IP is required".to_string());
+        }
+        
+        // Save the current configuration
+        self.save_config().ok();
+        
+        let log_line = format!(
+            "Starting client with:\nServer URL: {}\nPublic IP: {}\nPort: {}\n",
+            self.config.server_url, self.config.public_ip, self.config.port
+        );
+        self.log_text.push_str(&log_line);
+        
+        // Create the command to run the client
+        // Note: We're using the cactus executable (assuming it's in PATH)
+        let mut command = Command::new("cactus");
+        command
+            .arg("client")
+            .arg("--server-url")
+            .arg(&self.config.server_url)
+            .arg("--public-ip")
+            .arg(&self.config.public_ip)
+            .arg("--port")
+            .arg(&self.config.port);
+            
+        // Start the process
+        match command.spawn() {
+            Ok(child) => {
+                self.client_process = Some(child);
+                self.status_text = "Client running".to_string();
+                Ok(())
+            },
+            Err(e) => {
+                let error_msg = format!("Failed to start client: {}", e);
+                self.log_text.push_str(&format!("ERROR: {}\n", error_msg));
+                Err(error_msg)
+            }
+        }
+    }
+    
+    fn stop_client(&mut self) {
+        if let Some(mut child) = self.client_process.take() {
+            match child.kill() {
+                Ok(_) => {
+                    self.status_text = "Client stopped".to_string();
+                    self.log_text.push_str("Client stopped\n");
+                },
+                Err(e) => {
+                    self.status_text = format!("Failed to stop client: {}", e);
+                    self.log_text.push_str(&format!("ERROR: {}\n", self.status_text));
+                }
+            }
+        }
+    }
+}
+
+impl eframe::App for CactusClientApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Cactus Protocol Client");
+            
+            ui.add_space(10.0);
+            
+            // Configuration section
+            ui.group(|ui| {
+                ui.heading("Configuration");
+                
+                ui.add_space(5.0);
+                
+                ui.horizontal(|ui| {
+                    ui.label("Server URL:");
+                    ui.text_edit_singleline(&mut self.config.server_url);
+                });
+                
+                ui.horizontal(|ui| {
+                    ui.label("Public IP:");
+                    ui.text_edit_singleline(&mut self.config.public_ip);
+                });
+                
+                ui.add_space(2.0);
+                ui.label("Your IP must be static so jobs can reach you");
+                
+                ui.horizontal(|ui| {
+                    ui.label("Port:");
+                    ui.text_edit_singleline(&mut self.config.port);
+                });
+                
+                ui.add_space(10.0);
+                
+                // Save config button
+                if ui.button("Save Configuration").clicked() {
+                    if let Err(e) = self.save_config() {
+                        self.status_text = e;
+                    } else {
+                        self.status_text = "Configuration saved".to_string();
+                    }
+                }
+            });
+            
+            ui.add_space(10.0);
+            
+            // Control section
+            ui.group(|ui| {
+                ui.heading("Client Control");
+                
+                ui.horizontal(|ui| {
+                    if self.client_process.is_some() {
+                        if ui.button("Stop Client").clicked() {
+                            self.stop_client();
+                        }
+                    } else {
+                        if ui.button("Start Client").clicked() {
+                            if let Err(e) = self.start_client() {
+                                self.status_text = e;
+                            }
+                        }
+                    }
+                    
+                    ui.label(&self.status_text);
+                });
+            });
+            
+            ui.add_space(10.0);
+            
+            // Log section
+            ui.group(|ui| {
+                ui.heading("Logs");
+                
+                let text_height = ui.available_height() - 40.0;
+                
+                egui::ScrollArea::vertical().max_height(text_height).show(ui, |ui| {
+                    let mut text_edit = egui::TextEdit::multiline(&mut self.log_text)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(10)
+                        .lock_focus(true);
+                    
+                    // In egui 0.22.0, read_only is not a method, but we can make it non-interactive
+                    text_edit = text_edit.interactive(false);
+                    
+                    ui.add(text_edit);
+                });
+                
+                if ui.button("Clear Logs").clicked() {
+                    self.log_text = "Logs cleared\n".to_string();
+                }
+            });
+        });
+    }
+}
+
+fn main() -> Result<(), eframe::Error> {
+    let options = eframe::NativeOptions {
+        initial_window_size: Some(egui::vec2(600.0, 700.0)),
+        ..Default::default()
+    };
+    
+    eframe::run_native(
+        "Cactus Protocol Desktop Client",
+        options,
+        Box::new(|_cc| Box::new(CactusClientApp::new()))
+    )
+}
