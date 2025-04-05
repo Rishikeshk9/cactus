@@ -1,9 +1,46 @@
 print(">>> gpu_loadrust.py Loading...")
 import sys
 import os
+from pathlib import Path
 
 # Add the directory of this file (i.e., protocol/) to sys.path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+current_dir = Path(__file__).parent.absolute()
+sys.path.append(str(current_dir))
+
+# Try to import torch with better error handling
+try:
+    import torch
+    TORCH_AVAILABLE = True
+    CUDA_AVAILABLE = torch.cuda.is_available()
+    if CUDA_AVAILABLE:
+        CUDA_VERSION = torch.version.cuda
+    else:
+        CUDA_VERSION = None
+except ImportError as e:
+    print(f"Warning: Could not import PyTorch: {e}")
+    TORCH_AVAILABLE = False
+    CUDA_AVAILABLE = False
+    CUDA_VERSION = None
+
+# Rest of the imports with better error handling
+REQUIRED_PACKAGES = {
+    'PIL': 'Pillow',
+    'requests': 'requests',
+    'torchvision': 'torchvision',
+    'diffusers': 'diffusers',
+    'fastapi': 'fastapi'
+}
+
+missing_packages = []
+for module, package in REQUIRED_PACKAGES.items():
+    try:
+        __import__(module)
+    except ImportError:
+        missing_packages.append(package)
+
+if missing_packages:
+    print(f"Warning: Missing required packages: {', '.join(missing_packages)}")
+    print("Please install them using: pip install " + " ".join(missing_packages))
 
 import os
 import torch
@@ -25,7 +62,6 @@ from diffusers import StableDiffusionPipeline
 import base64
 from fastapi.middleware.cors import CORSMiddleware
 import argparse
-from pathlib import Path
 
 
 app = FastAPI()
@@ -121,31 +157,66 @@ class GPUModelLoader:
     def __init__(self):
         if not self.initialized:
             self.models = {}
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self.torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
-            self.port = 8000  # Default port
+            
+            # More robust device detection
+            if not TORCH_AVAILABLE:
+                self.device = "cpu"
+                self.torch_dtype = None
+                print("Warning: PyTorch not available, falling back to CPU only")
+            else:
+                self.device = torch.device("cuda" if CUDA_AVAILABLE else "cpu")
+                self.torch_dtype = torch.float16 if CUDA_AVAILABLE else torch.float32
+                if CUDA_AVAILABLE:
+                    print(f"CUDA is available (version {CUDA_VERSION})")
+                else:
+                    print("CUDA is not available, using CPU")
+            
+            # Initialize other attributes
+            self.port = 8000
             self.client_manager = None
             self.initialized = True
+            
+            # Use Path for better cross-platform compatibility
             self.model_weights_dir = Path("model_weights")
             self.models_config_dir = Path("models_config")
             self.model_weights_dir.mkdir(exist_ok=True)
             self.models_config_dir.mkdir(exist_ok=True)
             
-            # Define COVID-19 X-ray image transforms
-            self.covid_transforms = transforms.Compose([
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485], std=[0.229])  # Single channel normalization
-            ])
+            # Initialize transforms only if torch is available
+            if TORCH_AVAILABLE:
+                self.covid_transforms = transforms.Compose([
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485], std=[0.229])
+                ])
+            else:
+                self.covid_transforms = None
             
-            # Define COVID-19 classes
             self.covid_classes = ["normal", "pneumonia", "covid-19"]
 
     def get_device_info(self):
-        """Get information about the current device."""
-        if torch.cuda.is_available():
-            return f"CUDA ({torch.cuda.get_device_name(0)})"
-        return "CPU"
+        """Get detailed information about the current device."""
+        info = {
+            "torch_available": TORCH_AVAILABLE,
+            "device_type": "cpu"
+        }
+        
+        if TORCH_AVAILABLE:
+            info.update({
+                "cuda_available": CUDA_AVAILABLE,
+                "cuda_version": CUDA_VERSION if CUDA_AVAILABLE else None,
+                "torch_version": torch.__version__,
+                "device_type": "cuda" if CUDA_AVAILABLE else "cpu"
+            })
+            
+            if CUDA_AVAILABLE:
+                info.update({
+                    "gpu_name": torch.cuda.get_device_name(0),
+                    "gpu_count": torch.cuda.device_count(),
+                    "current_device": torch.cuda.current_device()
+                })
+        
+        return info
 
     def get_loaded_models(self):
         """Get list of currently loaded models"""

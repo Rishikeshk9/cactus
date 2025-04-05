@@ -56,96 +56,35 @@ impl ModelManager {
         let mut module = self.python_module.lock().await;
         
         Python::with_gil(|py| {
-            tracing::info!("Loading Python GPU module...");
+            tracing::info!("Initializing Python environment...");
             
-            // First check if CUDA is available in Python
-            let torch = match py.import("torch") {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::error!("Failed to import torch: {}", e);
-                    return Err(anyhow::anyhow!("Failed to import torch: {}", e));
-                }
-            };
-            
-            let cuda_available: bool = match torch.getattr("cuda") {
-                Ok(cuda) => match cuda.getattr("is_available") {
-                    Ok(is_available) => match is_available.call0() {
-                        Ok(result) => match result.extract() {
-                            Ok(available) => available,
-                            Err(e) => {
-                                tracing::error!("Failed to extract CUDA availability: {}", e);
-                                return Err(anyhow::anyhow!("Failed to extract CUDA availability: {}", e));
+            // First try to import torch and check its availability
+            let torch_result = py.import("torch");
+            let cuda_available = match torch_result {
+                Ok(torch) => {
+                    match torch.getattr("cuda")?.getattr("is_available")?.call0()?.extract::<bool>() {
+                        Ok(available) => {
+                            if available {
+                                tracing::info!("CUDA is available");
+                                true
+                            } else {
+                                tracing::warn!("CUDA is not available, falling back to CPU");
+                                false
                             }
                         },
                         Err(e) => {
-                            tracing::error!("Failed to call is_available(): {}", e);
-                            return Err(anyhow::anyhow!("Failed to call is_available(): {}", e));
+                            tracing::warn!("Failed to check CUDA availability: {}, falling back to CPU", e);
+                            false
                         }
-                    },
-                    Err(e) => {
-                        tracing::error!("Failed to get is_available attribute: {}", e);
-                        return Err(anyhow::anyhow!("Failed to get is_available attribute: {}", e));
                     }
                 },
                 Err(e) => {
-                    tracing::error!("Failed to get cuda attribute: {}", e);
-                    return Err(anyhow::anyhow!("Failed to get cuda attribute: {}", e));
+                    tracing::warn!("PyTorch not available: {}, falling back to CPU-only mode", e);
+                    false
                 }
             };
             
-            if !cuda_available {
-                tracing::warn!("CUDA is not available in Python environment");
-            } else {
-                tracing::info!("CUDA is available in Python environment");
-                let cuda_version: String = match torch.getattr("version") {
-                    Ok(version) => match version.getattr("cuda") {
-                        Ok(cuda) => match cuda.extract::<String>() {
-                            Ok(version) => version,
-                            Err(e) => {
-                                tracing::error!("Failed to extract CUDA version: {}", e);
-                                return Err(anyhow::anyhow!("Failed to extract CUDA version: {}", e));
-                            }
-                        },
-                        Err(e) => {
-                            tracing::error!("Failed to get cuda attribute from version: {}", e);
-                            return Err(anyhow::anyhow!("Failed to get cuda attribute from version: {}", e));
-                        }
-                    },
-                    Err(e) => {
-                        tracing::error!("Failed to get version attribute: {}", e);
-                        return Err(anyhow::anyhow!("Failed to get version attribute: {}", e));
-                    }
-                };
-                tracing::info!("CUDA version: {}", cuda_version);
-            }
-            
-            // Load the Python file
-            tracing::info!("Loading Python module from file...");
-            
-            // // Add the protocol directory to Python's path (parent of current dir)
-            // let protocol_dir = std::env::current_dir()?.parent().unwrap().to_path_buf();
-            // let protocol_dir_str = protocol_dir.to_str().unwrap().replace('\\', "/");
-            
-            // // Create a simpler Python path setup
-            // let setup_code = format!(
-            //     "import sys; sys.path.insert(0, r'{}')",
-            //     protocol_dir_str
-            // );
-            
-            // tracing::info!("Adding Python path: {}", setup_code);
-            
-            // if let Err(e) = py.eval(&setup_code, None, None) {
-            //     tracing::error!("Failed to add protocol directory to Python path: {}", e);
-            //     return Err(anyhow::anyhow!("Failed to add protocol directory to Python path: {}", e));
-            // }
-            
-            // // Verify the path was added
-            // let verify_code = "print(sys.path[0])";
-            // if let Err(e) = py.eval(verify_code, None, None) {
-            //     tracing::error!("Failed to verify Python path: {}", e);
-            //     return Err(anyhow::anyhow!("Failed to verify Python path: {}", e));
-            // }
-            
+            // Load the Python module with better error handling
             let gpu_load = match PyModule::from_code(
                 py,
                 include_str!("../../../gpu_loadrust.py"),
@@ -162,47 +101,35 @@ impl ModelManager {
                 }
             };
 
-            // Get the GPUModelLoader class
-            tracing::info!("Getting GPUModelLoader class...");
+            // Get the GPUModelLoader class with better error handling
             let gpu_loader_class = match gpu_load.getattr("GPUModelLoader") {
-                Ok(class) => {
-                    tracing::info!("Successfully got GPUModelLoader class");
-                    class
-                },
+                Ok(class) => class,
                 Err(e) => {
                     tracing::error!("Failed to get GPUModelLoader class: {}", e);
                     return Err(anyhow::anyhow!("Failed to get GPUModelLoader class: {}", e));
                 }
             };
             
-            // Create a new instance of GPUModelLoader
-            tracing::info!("Creating new instance of GPUModelLoader...");
+            // Create instance with better error handling
             let loader_instance = match gpu_loader_class.call0() {
-                Ok(instance) => {
-                    tracing::info!("Successfully created GPUModelLoader instance");
-                    instance
-                },
+                Ok(instance) => instance,
                 Err(e) => {
                     tracing::error!("Failed to create GPUModelLoader instance: {}", e);
                     return Err(anyhow::anyhow!("Failed to create GPUModelLoader instance: {}", e));
                 }
             };
             
-            // Verify the instance is valid
-            tracing::info!("Verifying GPUModelLoader instance...");
-            if let Err(e) = loader_instance.getattr("device") {
-                tracing::error!("Failed to verify GPUModelLoader instance: {}", e);
-                return Err(anyhow::anyhow!("Failed to verify GPUModelLoader instance: {}", e));
+            // Get device info for logging
+            if let Ok(device_info) = loader_instance.getattr("get_device_info")?.call0() {
+                if let Ok(info_str) = device_info.str()?.extract::<String>() {
+                    tracing::info!("Device info: {}", info_str);
+                }
             }
             
             *module = Some(loader_instance.into());
-            
-            tracing::info!("Python GPU module loaded successfully");
-            Ok::<(), anyhow::Error>(())
-        })?;
-
-        self.initialized = true;
-        Ok(())
+            tracing::info!("Python environment initialized successfully");
+            Ok(())
+        })
     }
 
     pub async fn get_model(&mut self, model_cid: &str) -> Result<LoadedModel> {

@@ -399,8 +399,8 @@ impl GPUClientManager {
 
     pub async fn handle_prediction_request(&self, request: PredictionRequest) -> Result<PredictionResponse, Box<dyn StdError + Send + Sync>> {
         // Set Python environment variables before handling the request
-        std::env::set_var("PYTHONHOME", self.get_python_home()?);
-        std::env::set_var("PYTHONPATH", self.get_python_path()?);
+        // std::env::set_var("PYTHONHOME", self.get_python_home()?);
+        // std::env::set_var("PYTHONPATH", self.get_python_path()?);
 
         // Update status to busy
         let mut status = self.status.lock().await;
